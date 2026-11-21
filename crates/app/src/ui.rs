@@ -202,6 +202,8 @@ impl Bar {
             if !full {
                 sys::keep_top_free(self.bar_px);
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
+                let hwnds: Vec<isize> = self.wins.iter().map(|w| w.hwnd).collect();
+                sys::fit_maximized(&hwnds, self.bar_px);
             }
         }
         // The theme's own wallpaper as soon as it is drawn, on first start.
@@ -458,7 +460,7 @@ impl Bar {
                 ui.label(RichText::new(format!("Installed in {}", install::install_dir().display())).color(c(t.muted)).size(12.0));
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Quit the bar").clicked() { self.quit(ui.ctx()); }
+                    if ui.button("Quit the bar").clicked() { self.quit(); }
                     if ui.button("Uninstall Ronin Bar…").clicked() { self.confirm = Some(Confirm::Uninstall); }
                 });
                 self.confirm_row(ui);
@@ -515,7 +517,8 @@ impl Bar {
                         self.release();
                         install::uninstall(&self.settings);
                         install::remove_folder_after_exit();
-                        self.quit(ui.ctx());
+                        // Not `quit`: settings must not be written back into the folder being removed.
+                        std::process::exit(0);
                     }
                 }
             }
@@ -634,9 +637,12 @@ impl Bar {
         self.show_taskbar();
     }
 
-    fn quit(&mut self, ctx: &egui::Context) {
+    /// Ends Ronin Bar right away (also from the panel, which is a window of its own): gives back the
+    /// top strip and the taskbar first, so nothing is left behind.
+    fn quit(&mut self) -> ! {
         self.release();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.save();
+        std::process::exit(0)
     }
 }
 
