@@ -1,20 +1,24 @@
 //! The dock across the top of the screen and its control panel.
+use crate::glyph::{self, Glyph};
 use crate::{dock, download, install, store::Store, sys, worker};
-use eframe::egui::{self, Color32, RichText, Vec2};
+use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
 use ronin_core::wallhaven::{self, Wallpaper, COLLECTIONS, PER_COLLECTION};
+use ronin_core::{art, dock as pins};
 use std::collections::HashMap;
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 
 pub const TITLE: &str = "Ronin Bar";
+const PANEL_TITLE: &str = "Ronin Bar · control";
 /// Bar height in logical pixels.
-pub const BAR_HEIGHT: f32 = 34.0;
+pub const BAR_HEIGHT: f32 = 36.0;
 /// Dock icon size and slot width in logical pixels.
 const ICON: f32 = 20.0;
-const SLOT: f32 = 30.0;
+const SLOT: f32 = 34.0;
+const CLOCK_W: f32 = 170.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
@@ -26,10 +30,12 @@ pub struct Bar {
     store: Arc<Store>,
     settings: Settings,
     catalog: Arc<Mutex<Vec<Wallpaper>>>,
+    originals: Arc<Mutex<Vec<Wallpaper>>>,
     progress: Arc<Mutex<download::Progress>>,
     stats: Arc<Mutex<worker::Stats>>,
     tx: Sender<worker::Cmd>,
     hwnd: Option<HWND>,
+    bar_px: i32,
     topmost: bool,
     panel: bool,
     tab: Tab,
@@ -39,6 +45,8 @@ pub struct Bar {
     /// Open app windows, refreshed a few times a second.
     wins: Vec<dock::Win>,
     wins_at: Instant,
+    /// Taskbar and work-area check, about once a second.
+    guard_at: Instant,
     /// The app window that was in front before the bar was clicked.
     active: isize,
     /// Icons by file path (`None` = Windows had none).
@@ -55,36 +63,57 @@ fn visuals(t: &Theme) -> egui::Visuals {
     v.panel_fill = c(t.bg);
     v.window_fill = c(t.bg);
     v.extreme_bg_color = c(t.surface);
+    v.faint_bg_color = c(t.surface);
     v.override_text_color = Some(c(t.fg));
-    v.selection.bg_fill = c(t.accent);
+    v.selection.bg_fill = c(t.accent).gamma_multiply(0.8);
+    v.selection.stroke = Stroke::new(1.0, c(t.fg));
     v.hyperlink_color = c(t.accent);
+    v.window_stroke = Stroke::new(1.0, c(t.surface));
+    for w in [&mut v.widgets.inactive, &mut v.widgets.noninteractive, &mut v.widgets.hovered, &mut v.widgets.active, &mut v.widgets.open] {
+        w.corner_radius = 8.into();
+        w.bg_stroke = Stroke::NONE;
+    }
+    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, c(t.surface));
     for w in [&mut v.widgets.inactive, &mut v.widgets.noninteractive] { w.bg_fill = c(t.surface); w.weak_bg_fill = c(t.surface); }
-    v.widgets.hovered.weak_bg_fill = c(t.accent).gamma_multiply(0.35);
+    v.widgets.hovered.weak_bg_fill = c(t.accent).gamma_multiply(0.30);
+    v.widgets.hovered.bg_fill = c(t.accent).gamma_multiply(0.30);
     v.widgets.active.weak_bg_fill = c(t.accent).gamma_multiply(0.55);
+    v.widgets.active.bg_fill = c(t.accent).gamma_multiply(0.55);
     v
 }
 
 impl Bar {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Arc<Store>, settings: Settings) -> Bar {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
         let (stats, tx) = worker::start();
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
+        let originals = Arc::new(Mutex::new(Vec::new()));
         let progress = Arc::new(Mutex::new(download::Progress::default()));
+        let (w, h, scale) = sys::primary_screen();
+        download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone());
         if catalog.lock().map(|l| l.len()).unwrap_or(0) < COLLECTIONS.len() * PER_COLLECTION {
             download::run(store.clone(), catalog.clone(), progress.clone());
         }
-        let (w, _, scale) = sys::primary_screen();
-        Bar { store, settings, catalog, progress, stats, tx, hwnd: None, topmost: true, panel: false, tab: Tab::Wallpapers,
-              confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale,
-              wins: Vec::new(), wins_at: Instant::now() - Duration::from_secs(5), active: 0, icons: HashMap::new(), apps: None, query: String::new() }
+        let long_ago = Instant::now() - Duration::from_secs(5);
+        Bar { store, settings, catalog, originals, progress, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
+              confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
+              active: 0, icons: HashMap::new(), apps: None, query: String::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
     fn save(&self) { self.store.save_settings(&self.settings); }
+    fn open(&mut self, tab: Tab) { if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; } }
+
+    /// Built-in wallpapers first, then the downloaded ones.
+    fn walls(&self) -> Vec<Wallpaper> {
+        let mut l = self.originals.lock().map(|l| l.clone()).unwrap_or_default();
+        l.extend(self.catalog.lock().map(|l| l.clone()).unwrap_or_default());
+        l
+    }
 
     fn set_wallpaper(&mut self, id: &str) {
-        let w = self.catalog.lock().ok().and_then(|l| l.iter().find(|w| w.id == id).cloned());
-        if let Some(w) = w {
+        if let Some(w) = self.walls().into_iter().find(|w| w.id == id) {
             if sys::set_wallpaper(&self.store.wallpaper_file(&w)) {
                 self.settings.wallpaper = w.id;
                 self.last_change = Instant::now();
@@ -94,12 +123,12 @@ impl Bar {
     }
 
     fn step_wallpaper(&mut self, step: isize) {
-        let id = self.catalog.lock().ok().and_then(|l| wallhaven::next_id(&l, &self.settings.wallpaper, step).map(str::to_string));
-        if let Some(id) = id { self.set_wallpaper(&id); }
+        let list = self.walls();
+        if let Some(id) = wallhaven::next_id(&list, &self.settings.wallpaper, step).map(str::to_string) { self.set_wallpaper(&id); }
     }
 
     fn random_wallpaper(&mut self) {
-        let n = self.catalog.lock().map(|l| l.len()).unwrap_or(0);
+        let n = self.walls().len();
         if n > 1 {
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(1);
             self.step_wallpaper(1 + (nanos as usize % (n - 1)) as isize);
@@ -110,16 +139,8 @@ impl Bar {
         self.settings.theme = t.id.to_string();
         sys::apply_theme(t);
         self.save();
-    }
-
-    /// First frame: reserve the strip at the top of the screen for the bar.
-    fn dock(&mut self, ctx: &egui::Context) {
-        if self.hwnd.is_some() { return }
-        if let Some(h) = sys::find_window(TITLE) {
-            let px = (BAR_HEIGHT * ctx.pixels_per_point()).round() as i32;
-            sys::appbar_register(h, px);
-            self.hwnd = Some(h);
-        }
+        // A built-in wallpaper follows the theme.
+        if art::original_theme(&self.settings.wallpaper).is_some() { self.set_wallpaper(art::original_for(t.id)); }
     }
 
     fn icon(&mut self, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
@@ -135,12 +156,34 @@ impl Bar {
     fn pin(&mut self, path: &str) {
         let mut p = self.settings.pinned.clone();
         p.push(path.to_string());
-        self.settings.pinned = ronin_core::dock::clean_pins(p);
+        self.settings.pinned = pins::clean_pins(p);
         self.save();
     }
 
     fn unpin(&mut self, i: usize) {
         if i < self.settings.pinned.len() { self.settings.pinned.remove(i); self.save(); }
+    }
+
+    fn hide_taskbar(&mut self) {
+        let now = sys::taskbar_state();
+        let mut before = now;
+        if let Some(o) = self.settings.original.as_mut() {
+            match o.taskbar_state { Some(s) => before = s, None => { o.taskbar_state = Some(now); self.save(); } }
+        }
+        sys::hide_taskbar(before);
+    }
+
+    fn show_taskbar(&self) { sys::show_taskbar(self.settings.original.as_ref().and_then(|o| o.taskbar_state)); }
+
+    /// First frame: reserve the strip at the top of the screen, and take over from the taskbar.
+    fn dock(&mut self, ctx: &egui::Context) {
+        if self.hwnd.is_some() { return }
+        if let Some(h) = sys::find_window(TITLE) {
+            self.bar_px = (BAR_HEIGHT * ctx.pixels_per_point()).round() as i32;
+            sys::appbar_register(h, self.bar_px);
+            self.hwnd = Some(h);
+            if self.settings.hide_taskbar { self.hide_taskbar(); }
+        }
     }
 
     fn tick(&mut self) {
@@ -153,36 +196,66 @@ impl Bar {
         // Step back while a fullscreen app or game is in front.
         let full = self.stats.lock().map(|s| s.fullscreen).unwrap_or(false);
         if let Some(h) = self.hwnd { if full == self.topmost { self.topmost = !full; sys::set_topmost(h, self.topmost); } }
-        // A wallpaper once the first ones have downloaded.
+        // Explorer can bring the taskbar back or reset the work area (e.g. after it restarts).
+        if self.hwnd.is_some() && self.guard_at.elapsed() >= Duration::from_secs(1) {
+            self.guard_at = Instant::now();
+            if !full {
+                sys::keep_top_free(self.bar_px);
+                if self.settings.hide_taskbar { self.hide_taskbar(); }
+            }
+        }
+        // The theme's own wallpaper as soon as it is drawn, on first start.
         if self.settings.wallpaper.is_empty() {
-            let first = self.catalog.lock().ok().and_then(|l| l.first().map(|w| w.id.clone()));
-            if let Some(id) = first { self.set_wallpaper(&id); }
+            let id = art::original_for(&self.settings.theme);
+            if self.walls().iter().any(|w| w.id == id) { self.set_wallpaper(id); }
         }
         let m = self.settings.auto_change_minutes;
         if m > 0 && self.last_change.elapsed() >= Duration::from_secs(u64::from(m) * 60) { self.step_wallpaper(1); }
     }
 
-    /// One dock slot: the icon (or first letter), an accent line under it when `lit`.
-    fn slot(&mut self, ui: &mut egui::Ui, path: Option<&str>, name: &str, lit: bool, dim: bool) -> egui::Response {
+    // ───── the bar ─────
+
+    /// A clickable bar item: a glyph and optional text, with a soft pill on hover.
+    fn chip(&self, ui: &mut egui::Ui, text: Option<String>, lit: bool, draw: impl FnOnce(&egui::Painter, Rect)) -> egui::Response {
+        let t = self.theme();
+        let galley = text.map(|s| ui.painter().layout_no_wrap(s, FontId::proportional(12.5), c(t.fg)));
+        let (pad, gw, gap) = (8.0, 16.0, 5.0);
+        let w = pad * 2.0 + gw + galley.as_ref().map(|g| gap + g.size().x).unwrap_or(0.0);
+        let (rect, r) = ui.allocate_exact_size(vec2(w, BAR_HEIGHT), Sense::click());
+        let pill = rect.shrink2(vec2(1.0, 6.0));
+        if r.hovered() || lit { ui.painter().rect_filled(pill, 9.0, c(t.surface)); }
+        if lit { ui.painter().rect_stroke(pill, 9.0, Stroke::new(1.0, c(t.accent).gamma_multiply(0.7)), egui::StrokeKind::Inside); }
+        let g = Rect::from_center_size(pos2(rect.left() + pad + gw / 2.0, rect.center().y), Vec2::splat(gw));
+        draw(ui.painter(), g);
+        if let Some(gal) = galley { ui.painter().galley(pos2(g.right() + gap, rect.center().y - gal.size().y / 2.0), gal, c(t.fg)); }
+        r
+    }
+
+    fn divider(&self, ui: &mut egui::Ui) {
+        let (r, _) = ui.allocate_exact_size(vec2(9.0, BAR_HEIGHT), Sense::hover());
+        ui.painter().line_segment([pos2(r.center().x, r.top() + 11.0), pos2(r.center().x, r.bottom() - 11.0)], Stroke::new(1.0, c(self.theme().muted).gamma_multiply(0.45)));
+    }
+
+    /// One dock slot: the app's icon (or its first letter) and a marker when it is in front.
+    fn slot(&mut self, ui: &mut egui::Ui, path: Option<&str>, name: &str, front: bool, dim: bool) -> egui::Response {
         let t = self.theme();
         let tex = path.and_then(|p| self.icon(ui.ctx(), p));
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(SLOT, BAR_HEIGHT), egui::Sense::click());
-        if r.hovered() { ui.painter().rect_filled(rect.shrink2(Vec2::new(1.0, 3.0)), 6.0, c(t.accent).gamma_multiply(0.25)); }
-        let icon = egui::Rect::from_center_size(rect.center(), Vec2::splat(ICON));
-        let tint = if dim { Color32::from_white_alpha(120) } else { Color32::WHITE };
+        let (rect, r) = ui.allocate_exact_size(Vec2::new(SLOT, BAR_HEIGHT), Sense::click());
+        if r.hovered() || front { ui.painter().rect_filled(rect.shrink2(Vec2::new(2.0, 4.0)), 8.0, c(t.accent).gamma_multiply(if front { 0.18 } else { 0.28 })); }
+        let icon = Rect::from_center_size(rect.center() - vec2(0.0, 1.0), Vec2::splat(ICON));
+        let tint = if dim { Color32::from_white_alpha(110) } else { Color32::WHITE };
         match tex {
             Some(tex) => { egui::Image::new((tex.id(), Vec2::splat(ICON))).tint(tint).paint_at(ui, icon); }
             None => {
                 let letter: String = name.chars().next().unwrap_or('?').to_uppercase().collect();
-                ui.painter().rect_filled(icon, 5.0, c(t.surface));
-                ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, letter, egui::FontId::proportional(13.0), c(t.fg));
+                ui.painter().rect_filled(icon, 6.0, c(t.surface));
+                ui.painter().text(icon.center(), egui::Align2::CENTER_CENTER, letter, FontId::proportional(12.0), c(t.fg));
             }
         }
-        if lit {
-            let y = rect.bottom() - 3.0;
-            ui.painter().line_segment([egui::pos2(rect.center().x - 7.0, y), egui::pos2(rect.center().x + 7.0, y)], egui::Stroke::new(2.0, c(t.accent)));
+        if front {
+            ui.painter().rect_filled(Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 4.5), vec2(12.0, 2.5)), 1.5, c(t.accent));
         }
-        r.on_hover_text(name)
+        r
     }
 
     fn dock_items(&mut self, ui: &mut egui::Ui, room: f32) {
@@ -191,27 +264,24 @@ impl Bar {
         // Pinned apps: click opens, right-click manages them.
         let pinned = self.settings.pinned.clone();
         for p in pinned.iter().take(slots) {
-            let name = ronin_core::dock::display_name(p);
-            let r = self.slot(ui, Some(p), &name, false, false);
-            if r.clicked() && !dock::launch(p) { self.panel = true; self.tab = Tab::Apps; }
-            if r.secondary_clicked() { self.panel = true; self.tab = Tab::Apps; }
+            let r = self.slot(ui, Some(p), &pins::display_name(p), false, false);
+            if r.clicked() && !dock::launch(p) { self.open(Tab::Apps); }
+            if r.secondary_clicked() { self.open(Tab::Apps); }
         }
         slots = slots.saturating_sub(pinned.len());
-        if pinned.is_empty() && ui.add(egui::Button::new(RichText::new("+ apps").size(12.0).color(c(t.muted))).frame(false)).clicked() {
-            self.panel = true;
-            self.tab = Tab::Apps;
+        if pinned.is_empty() {
+            let r = self.chip(ui, Some("pin apps".into()), false, |p, g| glyph::draw(p, g, Glyph::Apps, c(t.muted)));
+            if r.clicked() { self.open(Tab::Apps); }
+            slots = slots.saturating_sub(3);
         }
-        if !self.wins.is_empty() {
-            let (r, _) = ui.allocate_exact_size(Vec2::new(9.0, BAR_HEIGHT), egui::Sense::hover());
-            ui.painter().line_segment([egui::pos2(r.center().x, r.top() + 9.0), egui::pos2(r.center().x, r.bottom() - 9.0)], egui::Stroke::new(1.0, c(t.muted)));
-        }
+        if !self.wins.is_empty() && slots > 0 { self.divider(ui); }
         // Open windows: click focuses (or minimises the one in front), middle-click closes, right-click pins.
         let wins = self.wins.clone();
-        // Keep one slot for "+N" when they don't all fit.
         let shown = if wins.len() <= slots { wins.len() } else { slots.saturating_sub(1) };
         for win in wins.iter().take(shown) {
-            let front = win.hwnd == self.active && !dock::is_minimized(win.hwnd);
-            let r = self.slot(ui, win.exe.as_deref(), &win.title, front, dock::is_minimized(win.hwnd));
+            let min = dock::is_minimized(win.hwnd);
+            let front = win.hwnd == self.active && !min;
+            let r = self.slot(ui, win.exe.as_deref(), &win.title, front, min);
             if r.clicked() {
                 if front { dock::minimize(win.hwnd); self.active = 0; } else { dock::focus(win.hwnd); self.active = win.hwnd; }
             }
@@ -220,81 +290,251 @@ impl Bar {
                 if let Some(exe) = &win.exe { if !self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(exe)) { let e = exe.clone(); self.pin(&e); } }
             }
         }
-        if wins.len() > shown { ui.label(RichText::new(format!("+{}", wins.len() - shown)).size(12.0).color(c(t.muted))); }
+        if wins.len() > shown {
+            ui.label(RichText::new(format!("+{}", wins.len() - shown)).size(12.0).color(c(t.muted)));
+        }
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
-        let muted = c(t.muted);
-        ui.spacing_mut().item_spacing.x = 4.0;
+        let (fg, muted, accent) = (c(t.fg), c(t.muted), c(t.accent));
+        let full = ui.max_rect();
+        ui.spacing_mut().item_spacing.x = 2.0;
+
+        // Clock in the middle: click for notifications and the calendar.
+        let clock = Rect::from_center_size(full.center(), vec2(CLOCK_W, BAR_HEIGHT));
+        let cr = ui.interact(clock, ui.scope_id().with("clock"), Sense::click());
+        {
+            let (wd, d, mo, h, mi) = sys::local_time();
+            const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+            const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            let p = ui.painter();
+            if cr.hovered() { p.rect_filled(clock.shrink2(vec2(10.0, 6.0)), 9.0, c(t.surface)); }
+            let time = p.layout_no_wrap(format!("{h:02}:{mi:02}"), FontId::proportional(14.0), fg);
+            let date = p.layout_no_wrap(format!("{}  {} {}", DAYS[wd as usize % 7], d, MONTHS[(mo as usize + 11) % 12]).to_uppercase(), FontId::proportional(11.0), muted);
+            let total = time.size().x + 10.0 + date.size().x;
+            let x0 = clock.center().x - total / 2.0;
+            let (tw, th, dh) = (time.size().x, time.size().y, date.size().y);
+            p.galley(pos2(x0, clock.center().y - th / 2.0), time, fg);
+            p.circle_filled(pos2(x0 + tw + 5.0, clock.center().y), 1.6, accent);
+            p.galley(pos2(x0 + tw + 10.0, clock.center().y - dh / 2.0 + 0.5), date, muted);
+        }
+        if cr.clicked() { sys::press_win(Some(b'N' as u16)); }
+
         ui.horizontal_centered(|ui| {
-            ui.add_space(8.0);
-            let menu = ui.add(egui::Button::new(RichText::new("ronin").strong().color(c(t.accent))).frame(false));
-            if menu.clicked() { self.panel = !self.panel; }
             ui.add_space(6.0);
-            // Leave room on the right for the clock and the controls.
-            let room = ui.available_width() - 520.0;
+            // The Ronin mark is the Start button; right-click opens Ronin's own panel.
+            let (mr, m) = ui.allocate_exact_size(vec2(40.0, BAR_HEIGHT), Sense::click());
+            if m.hovered() { ui.painter().rect_filled(mr.shrink2(vec2(2.0, 4.0)), 9.0, c(t.surface)); }
+            glyph::mark(ui.painter(), Rect::from_center_size(mr.center(), Vec2::splat(30.0)), accent, fg);
+            if m.clicked() { sys::press_win(None); }
+            if m.secondary_clicked() { self.panel = !self.panel; }
+            ui.add_space(4.0);
+
+            // The dock, on a soft island, up to the clock.
+            let island = ui.painter().add(egui::Shape::Noop);
+            let x0 = ui.cursor().min.x;
+            ui.add_space(4.0);
+            let room = clock.left() - x0 - 24.0;
             self.dock_items(ui, room);
+            ui.add_space(4.0);
+            let x1 = ui.cursor().min.x;
+            if x1 - x0 > 10.0 {
+                let r = Rect::from_min_max(pos2(x0, full.top() + 3.0), pos2(x1, full.bottom() - 3.0));
+                ui.painter().set(island, egui::Shape::rect_filled(r, 11.0, c(t.surface).gamma_multiply(0.55)));
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.add_space(8.0);
-                if ui.add(egui::Button::new(RichText::new("power").size(12.0)).frame(false)).clicked() { self.panel = true; self.tab = Tab::Power; }
-                ui.add_space(10.0);
-                let (wd, d, mo, h, mi) = sys::local_time();
-                const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-                const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-                ui.label(RichText::new(format!("{:02}:{:02}", h, mi)).size(13.0).strong());
-                ui.label(RichText::new(format!("{} {} {}", DAYS[wd as usize % 7], d, MONTHS[(mo as usize + 11) % 12])).size(12.0).color(muted));
-                ui.add_space(12.0);
-                let wall = ui.add(egui::Button::new(RichText::new("wall").size(12.0)).frame(false)).on_hover_text("Next wallpaper (right-click: all wallpapers)");
-                if wall.clicked() { self.step_wallpaper(1); }
-                if wall.secondary_clicked() { self.panel = true; self.tab = Tab::Wallpapers; }
-                ui.add_space(10.0);
+                ui.add_space(6.0);
+                let lit = |tab: Tab| self.panel && self.tab == tab;
+                let (lp, ls, la, lt, lw, lv) = (lit(Tab::Power), lit(Tab::Settings), lit(Tab::Apps), lit(Tab::Themes), lit(Tab::Wallpapers), lit(Tab::Sound));
+                if self.chip(ui, None, lp, |p, g| glyph::draw(p, g, Glyph::Power, accent)).clicked() { self.open(Tab::Power); }
+                self.divider(ui);
+                if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
+                if self.chip(ui, None, la, |p, g| glyph::draw(p, g, Glyph::Apps, fg)).clicked() { self.open(Tab::Apps); }
+                if self.chip(ui, None, lt, |p, g| glyph::draw(p, g, Glyph::Theme, fg)).clicked() { self.open(Tab::Themes); }
+                let wall = self.chip(ui, None, lw, |p, g| glyph::draw(p, g, Glyph::Wallpaper, fg));
+                if wall.clicked() { self.open(Tab::Wallpapers); }
+                if wall.secondary_clicked() { self.step_wallpaper(1); }
+                self.divider(ui);
                 if let Some((v, m)) = s.volume {
-                    let text = if m { "muted".to_string() } else { format!("{:.0}%", v * 100.0) };
-                    let r = ui.add(egui::Button::new(RichText::new(text).size(13.0)).frame(false))
-                        .on_hover_text("Click: mute / unmute · Scroll: volume");
+                    let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
+                    let r = self.chip(ui, Some(text), lv, |p, g| glyph::volume(p, g, v, m, fg));
                     if r.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
+                    if r.secondary_clicked() { self.open(Tab::Sound); }
                     if r.hovered() {
                         // One wheel notch = 5 %.
                         let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
                             egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
                         if dy != 0.0 { let _ = self.tx.send(worker::Cmd::Volume(v + dy.signum() * 0.05)); }
                     }
-                    ui.label(RichText::new("vol").color(muted).size(12.0));
-                    ui.add_space(10.0);
                 }
                 if let Some((b, charging)) = s.battery {
-                    ui.label(RichText::new(format!("{b}%{}", if charging { " +" } else { "" })).size(13.0));
-                    ui.label(RichText::new("bat").color(muted).size(12.0));
-                    ui.add_space(10.0);
+                    if self.chip(ui, Some(format!("{b}%")), false, |p, g| glyph::battery(p, g, b, charging, fg, accent)).clicked() { sys::press_win(Some(b'A' as u16)); }
                 }
-                ui.label(RichText::new(if s.online { "up" } else { "down" }).size(13.0).color(if s.online { c(t.fg) } else { c(t.accent) }));
-                ui.label(RichText::new("net").color(muted).size(12.0));
-                ui.add_space(10.0);
-                // right-to-left: value first, then label
-                ui.label(RichText::new(format!("{}%", s.ram)).size(13.0));
-                ui.label(RichText::new("ram").color(muted).size(12.0));
-                ui.add_space(10.0);
-                ui.label(RichText::new(format!("{}%", s.cpu)).size(13.0));
-                ui.label(RichText::new("cpu").color(muted).size(12.0));
+                if self.chip(ui, None, false, |p, g| glyph::network(p, g, s.online, fg, muted)).clicked() { sys::press_win(Some(b'A' as u16)); }
+                self.divider(ui);
+                if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
+                if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
             });
+        });
+
+        // A fine accent line along the bottom edge.
+        let y = full.bottom() - 0.5;
+        ui.painter().line_segment([pos2(full.left(), y), pos2(full.right(), y)], Stroke::new(1.0, accent.gamma_multiply(0.45)));
+    }
+
+    // ───── the control panel ─────
+
+    fn panel(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
+            ui.label(RichText::new("R O N I N").strong().size(15.0));
+            ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(c(t.muted)).size(11.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new("✕").size(13.0)).frame(false)).clicked() { self.panel = false; }
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (label, tab) in [("Apps", Tab::Apps), ("Wallpapers", Tab::Wallpapers), ("Themes", Tab::Themes), ("Sound", Tab::Sound), ("Power", Tab::Power), ("Settings", Tab::Settings)] {
+                if ui.selectable_label(self.tab == tab, label).clicked() { self.tab = tab; self.confirm = None; }
+            }
+        });
+        ui.separator();
+        match self.tab {
+            Tab::Apps => self.tab_apps(ui),
+            Tab::Wallpapers => self.tab_wallpapers(ui),
+            Tab::Themes => self.tab_themes(ui),
+            Tab::Sound => {
+                let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+                match s.volume {
+                    None => { ui.label("No sound device found."); }
+                    Some((v, m)) => {
+                        let mut pct = (v * 100.0).round();
+                        ui.horizontal(|ui| {
+                            ui.label("Volume");
+                            ui.spacing_mut().slider_width = 300.0;
+                            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
+                        });
+                        let mut mute = m;
+                        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("On the bar: click the speaker to mute, scroll over it to change the volume.").color(c(t.muted)).size(12.0));
+                    }
+                }
+            }
+            Tab::Power => {
+                ui.label(RichText::new("Unsaved work in other apps is lost on restart and shut down.").color(c(t.muted)));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Lock").clicked() { let _ = self.tx.send(worker::Cmd::Lock); }
+                    for (label, what) in [("Sleep", Confirm::Sleep), ("Restart", Confirm::Restart), ("Shut down", Confirm::ShutDown)] {
+                        if ui.button(label).clicked() { self.confirm = Some(what); }
+                    }
+                });
+                self.confirm_row(ui);
+            }
+            Tab::Settings => {
+                let mut on = self.settings.hide_taskbar;
+                if ui.checkbox(&mut on, "Replace the Windows taskbar").changed() {
+                    self.settings.hide_taskbar = on;
+                    self.save();
+                    if on { self.hide_taskbar(); } else { self.show_taskbar(); }
+                }
+                ui.label(RichText::new("Hides the Windows taskbar while Ronin Bar runs; it comes back when you quit or uninstall. The Ronin mark opens Start, the clock opens notifications, network and battery open quick settings.").color(c(t.muted)).size(12.0));
+                ui.add_space(6.0);
+                let mut start = self.settings.start_with_windows;
+                if ui.checkbox(&mut start, "Start with Windows").changed() {
+                    self.settings.start_with_windows = start;
+                    install::set_start_with_windows(start);
+                    self.save();
+                }
+                ui.add_space(10.0);
+                ui.label(RichText::new(format!("Installed in {}", install::install_dir().display())).color(c(t.muted)).size(12.0));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Quit the bar").clicked() { self.quit(ui.ctx()); }
+                    if ui.button("Uninstall Ronin Bar…").clicked() { self.confirm = Some(Confirm::Uninstall); }
+                });
+                self.confirm_row(ui);
+            }
+        }
+    }
+
+    fn tab_themes(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        ui.label(RichText::new("Colours the bar, sets Windows' dark or light mode and accent colour. A built-in wallpaper changes with it.").color(c(t.muted)).size(12.0));
+        ui.add_space(6.0);
+        for th in THEMES.iter() {
+            let selected = th.id == t.id;
+            let frame = egui::Frame::new().fill(c(th.bg)).corner_radius(12.0).inner_margin(egui::Margin::symmetric(14, 12))
+                .stroke(Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { c(th.accent) } else { c(th.surface) }));
+            let r = frame.show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    let (mr, _) = ui.allocate_exact_size(Vec2::splat(24.0), Sense::hover());
+                    glyph::mark(ui.painter(), mr, c(th.accent), c(th.fg));
+                    ui.label(RichText::new(th.name).color(c(th.fg)).strong().size(14.0));
+                    ui.label(RichText::new(if th.dark { "dark" } else { "light" }).color(c(th.muted)).size(12.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for col in [th.accent, th.muted, th.fg, th.surface] {
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                            ui.painter().circle_filled(rect.center(), 6.0, c(col));
+                        }
+                    });
+                });
+            }).response.interact(Sense::click());
+            if r.clicked() { self.set_theme(th); }
+            ui.add_space(4.0);
+        }
+    }
+
+    fn confirm_row(&mut self, ui: &mut egui::Ui) {
+        let Some(what) = self.confirm else { return };
+        let q = match what {
+            Confirm::Sleep => "Put the PC to sleep now?",
+            Confirm::Restart => "Restart the PC now?",
+            Confirm::ShutDown => "Shut down the PC now?",
+            Confirm::Uninstall => "Remove Ronin Bar and its wallpapers, bring the taskbar back, and put your old wallpaper and colours back?",
+        };
+        ui.add_space(8.0);
+        ui.label(RichText::new(q).strong());
+        ui.horizontal(|ui| {
+            if ui.button("Yes").clicked() {
+                self.confirm = None;
+                match what {
+                    Confirm::Sleep => { let _ = self.tx.send(worker::Cmd::Sleep); }
+                    Confirm::Restart => { let _ = self.tx.send(worker::Cmd::Restart); }
+                    Confirm::ShutDown => { let _ = self.tx.send(worker::Cmd::ShutDown); }
+                    Confirm::Uninstall => {
+                        self.release();
+                        install::uninstall(&self.settings);
+                        install::remove_folder_after_exit();
+                        self.quit(ui.ctx());
+                    }
+                }
+            }
+            if ui.button("No").clicked() { self.confirm = None; }
         });
     }
 
     fn tab_apps(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let ctx = ui.ctx().clone();
-        ui.label(RichText::new("Pin apps to the dock. Click opens · right-click an open window pins its program · middle-click closes a window.").color(c(t.muted)).size(12.0));
+        ui.label(RichText::new("Click an icon to open it · click the window in front to minimise it · middle-click closes a window · right-click an open window to pin its program.").color(c(t.muted)).size(12.0));
         ui.add_space(4.0);
-        ui.label(RichText::new(format!("Pinned · {}/{}", self.settings.pinned.len(), ronin_core::dock::MAX_PINNED)).strong());
+        ui.label(RichText::new(format!("Pinned  {}/{}", self.settings.pinned.len(), pins::MAX_PINNED)).strong());
         let pinned = self.settings.pinned.clone();
         let mut action: Option<(usize, i8)> = None; // (index, -1 left / 1 right / 0 unpin)
         for (i, p) in pinned.iter().enumerate() {
             ui.horizontal(|ui| {
                 match self.icon(&ctx, p) { Some(tex) => { ui.add(egui::Image::new((tex.id(), Vec2::splat(18.0)))); } None => { ui.add_space(22.0); } }
-                ui.label(ronin_core::dock::display_name(p)).on_hover_text(p);
+                ui.label(pins::display_name(p)).on_hover_text(p);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("unpin").clicked() { action = Some((i, 0)); }
                     if ui.add_enabled(i + 1 < pinned.len(), egui::Button::new("→").small()).clicked() { action = Some((i, 1)); }
@@ -302,7 +542,7 @@ impl Bar {
                 });
             });
         }
-        if pinned.is_empty() { ui.label(RichText::new("Nothing pinned yet.").color(c(t.muted))); }
+        if pinned.is_empty() { ui.label(RichText::new("Nothing pinned yet: pick apps below.").color(c(t.muted))); }
         match action {
             Some((i, 0)) => self.unpin(i),
             Some((i, d)) => { let j = (i as isize + d as isize) as usize; self.settings.pinned.swap(i, j); self.save(); }
@@ -311,21 +551,20 @@ impl Bar {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Start menu").strong());
-            ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("search").desired_width(200.0));
+            ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("search").desired_width(220.0));
             if ui.small_button("refresh").clicked() { self.apps = None; }
         });
         if self.apps.is_none() { self.apps = Some(dock::start_menu_apps()); }
-        let list: Vec<(String, String)> = self.apps.as_ref().map(|a| a.iter().filter(|(n, _)| ronin_core::dock::matches(n, &self.query)).cloned().collect()).unwrap_or_default();
-        let full = self.settings.pinned.len() >= ronin_core::dock::MAX_PINNED;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 24.0, list.len(), |ui, range| {
+        let list: Vec<(String, String)> = self.apps.as_ref().map(|a| a.iter().filter(|(n, _)| pins::matches(n, &self.query)).cloned().collect()).unwrap_or_default();
+        let full = self.settings.pinned.len() >= pins::MAX_PINNED;
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 26.0, list.len(), |ui, range| {
             for (name, path) in &list[range] {
                 ui.horizontal(|ui| {
                     match self.icon(&ctx, path) { Some(tex) => { ui.add(egui::Image::new((tex.id(), Vec2::splat(18.0)))); } None => { ui.add_space(22.0); } }
                     ui.label(name);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let is_pinned = self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(path));
-                        if is_pinned {
-                            ui.label(RichText::new("pinned").color(c(t.muted)).size(12.0));
+                        if self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(path)) {
+                            ui.label(RichText::new("pinned").color(c(t.accent)).size(12.0));
                         } else if ui.add_enabled(!full, egui::Button::new("pin").small()).clicked() {
                             let p = path.clone();
                             self.pin(&p);
@@ -338,114 +577,11 @@ impl Bar {
         if list.is_empty() { ui.label(RichText::new("No Start-menu apps match.").color(c(t.muted))); }
     }
 
-    fn panel(&mut self, ui: &mut egui::Ui) {
-        let t = self.theme();
-        ui.horizontal(|ui| {
-            for (label, tab) in [("Apps", Tab::Apps), ("Wallpapers", Tab::Wallpapers), ("Themes", Tab::Themes), ("Sound", Tab::Sound), ("Power", Tab::Power), ("Settings", Tab::Settings)] {
-                if ui.selectable_label(self.tab == tab, label).clicked() { self.tab = tab; self.confirm = None; }
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("close").clicked() { self.panel = false; }
-            });
-        });
-        ui.separator();
-        match self.tab {
-            Tab::Apps => self.tab_apps(ui),
-            Tab::Wallpapers => self.tab_wallpapers(ui),
-            Tab::Themes => {
-                ui.label(RichText::new("Colours the bar and sets Windows' dark/light mode and accent colour.").color(c(t.muted)));
-                ui.add_space(6.0);
-                for th in THEMES.iter() {
-                    let selected = th.id == t.id;
-                    let frame = egui::Frame::new().fill(c(th.bg)).corner_radius(8.0).inner_margin(10.0)
-                        .stroke(egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { c(th.accent) } else { c(th.surface) }));
-                    let r = frame.show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(th.name).color(c(th.fg)).strong());
-                            ui.label(RichText::new(if th.dark { "dark" } else { "light" }).color(c(th.muted)));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                for col in [th.accent, th.muted, th.surface] {
-                                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), egui::Sense::hover());
-                                    ui.painter().circle_filled(rect.center(), 7.0, c(col));
-                                }
-                            });
-                        });
-                    }).response.interact(egui::Sense::click());
-                    if r.clicked() { self.set_theme(th); }
-                    ui.add_space(4.0);
-                }
-            }
-            Tab::Sound => {
-                let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
-                match s.volume {
-                    None => { ui.label("No sound device found."); }
-                    Some((v, m)) => {
-                        let mut pct = (v * 100.0).round();
-                        ui.horizontal(|ui| {
-                            ui.label("Volume");
-                            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
-                        });
-                        let mut mute = m;
-                        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
-                    }
-                }
-            }
-            Tab::Power => {
-                ui.label(RichText::new("Unsaved work in other apps is lost on restart and shut down.").color(c(t.muted)));
-                ui.add_space(6.0);
-                if ui.button("Lock").clicked() { let _ = self.tx.send(worker::Cmd::Lock); }
-                for (label, what) in [("Sleep", Confirm::Sleep), ("Restart", Confirm::Restart), ("Shut down", Confirm::ShutDown)] {
-                    if ui.button(label).clicked() { self.confirm = Some(what); }
-                }
-                self.confirm_row(ui);
-            }
-            Tab::Settings => {
-                let mut on = self.settings.start_with_windows;
-                if ui.checkbox(&mut on, "Start with Windows").changed() {
-                    self.settings.start_with_windows = on;
-                    install::set_start_with_windows(on);
-                    self.save();
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new(format!("Installed in {}", install::install_dir().display())).color(c(t.muted)).size(12.0));
-                ui.label(RichText::new(format!("Ronin Bar {}", env!("CARGO_PKG_VERSION"))).color(c(t.muted)).size(12.0));
-                ui.add_space(12.0);
-                if ui.button("Quit the bar").clicked() { self.quit(ui.ctx()); }
-                if ui.button("Uninstall Ronin Bar…").clicked() { self.confirm = Some(Confirm::Uninstall); }
-                self.confirm_row(ui);
-            }
-        }
-    }
-
-    fn confirm_row(&mut self, ui: &mut egui::Ui) {
-        let Some(what) = self.confirm else { return };
-        let q = match what {
-            Confirm::Sleep => "Put the PC to sleep now?",
-            Confirm::Restart => "Restart the PC now?",
-            Confirm::ShutDown => "Shut down the PC now?",
-            Confirm::Uninstall => "Remove Ronin Bar and its wallpapers, and put your old wallpaper and colours back?",
-        };
-        ui.add_space(8.0);
-        ui.label(RichText::new(q).strong());
-        ui.horizontal(|ui| {
-            if ui.button("Yes").clicked() {
-                self.confirm = None;
-                match what {
-                    Confirm::Sleep => { let _ = self.tx.send(worker::Cmd::Sleep); }
-                    Confirm::Restart => { let _ = self.tx.send(worker::Cmd::Restart); }
-                    Confirm::ShutDown => { let _ = self.tx.send(worker::Cmd::ShutDown); }
-                    Confirm::Uninstall => { install::uninstall(&self.settings); install::remove_folder_after_exit(); self.quit(ui.ctx()); }
-                }
-            }
-            if ui.button("No").clicked() { self.confirm = None; }
-        });
-    }
-
     fn tab_wallpapers(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let p = self.progress.lock().map(|p| p.clone()).unwrap_or_default();
-        let list = self.catalog.lock().map(|l| l.clone()).unwrap_or_default();
+        let list = self.walls();
+        let downloaded = self.catalog.lock().map(|l| l.len()).unwrap_or(0);
         ui.horizontal(|ui| {
             if ui.button("previous").clicked() { self.step_wallpaper(-1); }
             if ui.button("next").clicked() { self.step_wallpaper(1); }
@@ -459,36 +595,47 @@ impl Bar {
             });
         });
         if p.running {
-            ui.label(RichText::new(format!("Downloading wallpapers from wallhaven.cc… {}/{}", p.done, p.total)).color(c(t.muted)));
-        } else if let Some(e) = &p.error {
-            ui.label(RichText::new(format!("Some downloads failed: {e}")).color(c(t.accent)).size(12.0));
+            ui.label(RichText::new(format!("Downloading anime wallpapers from wallhaven.cc…  {}/{}", p.done, p.total)).color(c(t.muted)).size(12.0));
+        } else if p.error.is_some() && downloaded < COLLECTIONS.len() * PER_COLLECTION {
+            ui.label(RichText::new(format!("{} of {} anime wallpapers downloaded. Check the internet connection and try again.", downloaded, COLLECTIONS.len() * PER_COLLECTION)).color(c(t.accent)).size(12.0))
+                .on_hover_text(p.error.clone().unwrap_or_default());
         }
-        if !p.running && list.len() < COLLECTIONS.len() * PER_COLLECTION && ui.button("Download missing wallpapers").clicked() {
+        if !p.running && downloaded < COLLECTIONS.len() * PER_COLLECTION && ui.button("Download the anime wallpapers").clicked() {
             download::run(self.store.clone(), self.catalog.clone(), self.progress.clone());
         }
         ui.add_space(4.0);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for col in COLLECTIONS {
-                let items: Vec<&Wallpaper> = list.iter().filter(|w| w.collection == col.name).collect();
-                ui.label(RichText::new(format!("{} · {}", col.name, items.len())).strong());
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let names: Vec<&str> = std::iter::once(art::ORIGINALS_NAME).chain(COLLECTIONS.iter().map(|c| c.name)).collect();
+            for name in names {
+                let items: Vec<&Wallpaper> = list.iter().filter(|w| w.collection == name).collect();
+                ui.label(RichText::new(format!("{name}  ·  {}", items.len())).strong());
                 ui.horizontal_wrapped(|ui| {
                     for w in items {
                         let uri = format!("file://{}", self.store.thumb_file(w).display());
                         let current = w.id == self.settings.wallpaper;
-                        let img = egui::Image::new(uri).fit_to_exact_size(Vec2::new(122.0, 69.0)).corner_radius(6.0);
-                        let r = ui.add(egui::Button::image(img).selected(current))
-                            .on_hover_text(format!("{} · {}\n{}", w.collection, w.resolution, w.page));
+                        let img = egui::Image::new(uri).fit_to_exact_size(Vec2::new(122.0, 69.0)).corner_radius(8.0);
+                        let tip = if w.page.is_empty() { format!("{} · drawn by Ronin Bar", w.collection) } else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
+                        let r = ui.add(egui::Button::image(img).selected(current)).on_hover_text(tip);
                         if r.clicked() { let id = w.id.clone(); self.set_wallpaper(&id); }
                     }
                 });
-                ui.add_space(6.0);
+                ui.add_space(8.0);
             }
-            ui.label(RichText::new("Wallpapers come from wallhaven.cc and belong to their artists; they are downloaded to this PC for personal use.").color(c(t.muted)).size(11.0));
+            ui.label(RichText::new("The anime wallpapers come from wallhaven.cc and belong to their artists; they are downloaded to this PC for personal use. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
         });
     }
 
+    /// Gives back the top strip and the taskbar.
+    fn release(&mut self) {
+        if let Some(h) = self.hwnd.take() {
+            sys::appbar_remove(h);
+            sys::release_top(self.bar_px);
+        }
+        self.show_taskbar();
+    }
+
     fn quit(&mut self, ctx: &egui::Context) {
-        if let Some(h) = self.hwnd.take() { sys::appbar_remove(h); }
+        self.release();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
@@ -505,14 +652,15 @@ impl eframe::App for Bar {
             self.bar(ui);
         });
         if self.panel {
-            let (w, h) = (440.0, 560.0);
-            let pos = egui::pos2((self.screen_w - w - 8.0).max(0.0), BAR_HEIGHT + 6.0);
+            let (w, h) = (580.0, 640.0);
+            let pos = egui::pos2((self.screen_w - w - 10.0).max(0.0), BAR_HEIGHT + 8.0);
             let builder = egui::ViewportBuilder::default()
-                .with_title("Ronin Bar")
+                .with_title(PANEL_TITLE)
                 .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
                 .with_inner_size([w, h]).with_position(pos);
             let close = ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("ronin-panel"), builder, |ui, _class| {
-                egui::Frame::new().fill(c(self.theme().bg)).inner_margin(12.0).show(ui, |ui| {
+                let t = self.theme();
+                egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     self.panel(ui);
                 });
@@ -522,7 +670,5 @@ impl eframe::App for Bar {
         }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        if let Some(h) = self.hwnd.take() { sys::appbar_remove(h); }
-    }
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { self.release(); }
 }

@@ -11,26 +11,31 @@ pub struct Original {
     pub system_uses_light_theme: Option<u32>,
     pub accent_color: Option<u32>,
     pub accent_color_menu: Option<u32>,
+    /// The Windows taskbar's auto-hide state (ABM_GETSTATE) before Ronin Bar hid it.
+    #[serde(default)]
+    pub taskbar_state: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub theme: String,
-    /// Wallhaven id of the current wallpaper.
+    /// Id of the current wallpaper: a wallhaven id, or `ronin1`…`ronin5` for the built-in ones.
     pub wallpaper: String,
     /// Change the wallpaper every N minutes (0 = never).
     pub auto_change_minutes: u32,
     pub start_with_windows: bool,
     /// Apps pinned to the dock: Start-menu shortcuts or programs.
     pub pinned: Vec<String>,
+    /// Hide the Windows taskbar while Ronin Bar runs (it comes back when the bar quits).
+    pub hide_taskbar: bool,
     /// Filled once, the first time Ronin Bar changes anything.
     pub original: Option<Original>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, original: None }
     }
 }
 
