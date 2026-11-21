@@ -1,4 +1,5 @@
-# Publish a release: Actions → release → Run workflow (on main).
+# Publish a release: Actions → release → Run workflow (on main). Running it again for the same
+# version replaces that release's files with a fresh build.
 # Builds ronin-bar.exe on Windows and publishes it with its SHA-256 as v<version from Cargo.toml>.
 name: release
 on:
@@ -25,4 +26,11 @@ jobs:
           $h = (Get-FileHash "dist/Ronin-Bar-$v.exe" -Algorithm SHA256).Hash.ToLower()
           "$h  Ronin-Bar-$v.exe" | Out-File "dist/Ronin-Bar-$v.exe.sha256" -Encoding ascii -NoNewline
           $notes = "Download **Ronin-Bar-$v.exe** and run it: it asks once, then installs itself into one folder.`n`nUninstall from Settings → Apps → Ronin Bar.`n`nSHA-256: ``$h``"
-          gh release create "v$v" dist/* --title "Ronin Bar $v" --notes $notes --target $env:GITHUB_SHA
+          # A version that is already released gets its files replaced (same version, newer build).
+          gh release view "v$v" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload "v$v" dist/* --clobber
+            gh release edit "v$v" --notes "$notes`n`nUpdated build from commit $env:GITHUB_SHA."
+          } else {
+            gh release create "v$v" dist/* --title "Ronin Bar $v" --notes $notes --target $env:GITHUB_SHA
+          }
