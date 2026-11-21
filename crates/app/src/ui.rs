@@ -526,6 +526,7 @@ impl Bar {
         let t = self.theme();
         ui.label(RichText::new("Colours the bar, sets Windows' dark or light mode and accent colour. A built-in wallpaper changes with it.").color(c(t.muted)).size(12.0));
         ui.add_space(6.0);
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         for th in THEMES.iter() {
             let selected = th.id == t.id;
             let frame = egui::Frame::new().fill(c(th.bg)).corner_radius(12.0).inner_margin(egui::Margin::symmetric(14, 12))
@@ -548,6 +549,7 @@ impl Bar {
             if r.clicked() { self.set_theme(th); }
             ui.add_space(4.0);
         }
+        });
     }
 
     fn confirm_row(&mut self, ui: &mut egui::Ui) {

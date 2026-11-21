@@ -3,7 +3,10 @@
 use crate::theme::{Rgb, Theme, THEMES};
 
 /// Ids of the built-in wallpapers, one per theme, in theme order.
-pub const ORIGINAL_IDS: [&str; 5] = ["ronin1", "ronin2", "ronin3", "ronin4", "ronin5"];
+pub const ORIGINAL_IDS: [&str; 9] = ["ronin1", "ronin2", "ronin3", "ronin4", "ronin5", "ronin6", "ronin7", "ronin8", "ronin9"];
+
+/// Where the sun stands (fraction of the width) in each theme's wallpaper.
+const SUN_X: [f32; 9] = [0.70, 0.30, 0.64, 0.36, 0.68, 0.32, 0.66, 0.34, 0.72];
 pub const ORIGINALS_NAME: &str = "Ronin originals";
 
 /// The built-in wallpaper drawn in this theme's colours.
@@ -51,7 +54,7 @@ pub fn wallpaper(t: &Theme, w: u32, h: u32) -> Vec<u8> {
     let sky_top = to8(mix(t.bg, t.accent, if t.dark { 0.06 } else { 0.04 }));
     let sky_low = to8(mix(t.bg, t.accent, if t.dark { 0.42 } else { 0.30 }));
     let sun_c = to8(mix(t.accent, [255, 255, 255], if t.dark { 0.18 } else { 0.05 }));
-    let (sun_x, sun_y, sun_r) = (wf * [0.70, 0.30, 0.64, 0.36, 0.68][(seed as usize - 1) % 5], hf * 0.50, hf * 0.16);
+    let (sun_x, sun_y, sun_r) = (wf * SUN_X[(seed as usize - 1) % SUN_X.len()], hf * 0.50, hf * 0.16);
     // Mountains fade from misty (far) to ink (near).
     let layers = [to8(mix(sky_low, deep, 0.35)), to8(mix(sky_low, deep, 0.62)), to8(mix(sky_low, deep, 0.88))];
     let ridges: Vec<[f32; 3]> = (0..w).map(|x| {
@@ -140,9 +143,9 @@ mod tests {
             assert_eq!(img, wallpaper(t, w, h), "the same every time");
             // The sun stands out from the sky above it; on dark themes the bottom is ink.
             let i = THEMES.iter().position(|o| o.id == t.id).unwrap();
-            let sx = (w as f32 * [0.70, 0.30, 0.64, 0.36, 0.68][i]) as u32;
-            assert!(bright(px(&img, w, sx, h / 2 - 5)).abs_diff(bright(px(&img, w, sx, 2))) > 90, "{}", t.id);
-            if t.dark { assert!(bright(px(&img, w, 5, h - 2)) < bright(px(&img, w, sx, h / 2 - 5)), "{}", t.id); }
+            let (sx, sy) = ((w as f32 * SUN_X[i]) as u32, (h as f32 * 0.39) as u32); // upper part of the sun, above any ridge
+            assert!(bright(px(&img, w, sx, sy)).abs_diff(bright(px(&img, w, sx, 2))) > 90, "{}", t.id);
+            if t.dark { assert!(bright(px(&img, w, 5, h - 2)) < bright(px(&img, w, sx, sy)), "{}", t.id); }
         }
     }
 }

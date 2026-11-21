@@ -106,7 +106,7 @@ pub fn full(store: Arc<Store>, w: Wallpaper, done: Fetched) {
     });
 }
 
-/// The five built-in Ronin wallpapers, ready in `ready` as they are drawn (the current theme's first).
+/// The built-in Ronin wallpapers (one per theme), ready in `ready` as they are drawn (the current theme's first).
 /// They are drawn at the screen's resolution once, then reused.
 pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, ready: Arc<Mutex<Vec<Wallpaper>>>) {
     use ronin_core::{art, theme::THEMES};
