@@ -33,7 +33,7 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 | ⚙ | Settings: replace the taskbar, start with Windows, quit, uninstall |
 | power | Lock, sleep, restart, shut down (asks before sleep, restart and shut down) |
 
-**9 Ronin originals**, drawn by Ronin Bar itself at your screen's resolution: a sunset over misty mountains with a lone ronin, one in each theme's colours. They are ready on first start, work offline, and follow the theme.
+**9 Ronin originals**, drawn by Ronin Bar itself at your screen's resolution: a sunset over misty mountains with stars, clouds across the sun, a torii gate, birds and a lone ronin (cherry petals in Sakura and Washi), one in each theme's colours. They are ready on first start, work offline, and follow the theme.
 
 **80 anime wallpapers** in 8 collections: Samurai, Anime cars, Anime scenery, Cyberpunk city, Night sky, Cherry blossom, Rainy streets and Sunset, each the 10 most-favourited of all time on [Wallhaven](https://wallhaven.cc). Previews arrive in the background on first start; a full picture is downloaded when you choose it. They are not stored in this repository, because they belong to their artists. Only the anime category and safe-for-work images are used. Previous / next / random, or change automatically every 15 min to 3 h.
 

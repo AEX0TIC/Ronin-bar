@@ -111,6 +111,9 @@ pub fn full(store: Arc<Store>, w: Wallpaper, done: Fetched) {
 pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, ready: Arc<Mutex<Vec<Wallpaper>>>) {
     use ronin_core::{art, theme::THEMES};
     std::thread::spawn(move || {
+        // Wallpapers drawn by an older version of the drawing code are drawn again.
+        let marker = store.data.join("wallpapers").join("ronin-art.txt");
+        let fresh = std::fs::read_to_string(&marker).ok().map(|v| v.trim() == art::ART_VERSION.to_string()).unwrap_or(false);
         let mut order: Vec<usize> = (0..THEMES.len()).collect();
         order.sort_by_key(|&i| THEMES[i].id != first_theme);
         for i in order {
@@ -120,7 +123,7 @@ pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, rea
                 id: id.to_string(), collection: art::ORIGINALS_NAME.to_string(), url: format!("{id}.png"), thumb: String::new(),
                 page: String::new(), resolution: format!("{}x{}", screen.0, screen.1),
             };
-            let have = store.wallpaper_file(&w).is_file() && store.thumb_file(&w).is_file();
+            let have = fresh && store.wallpaper_file(&w).is_file() && store.thumb_file(&w).is_file();
             if !have {
                 let save = |path: std::path::PathBuf, wd: u32, ht: u32, fmt: image::ImageFormat| -> Option<()> {
                     let img = image::RgbImage::from_raw(wd, ht, art::wallpaper(t, wd, ht))?;
@@ -134,5 +137,6 @@ pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, rea
             }
             if let Ok(mut l) = ready.lock() { if !l.iter().any(|x| x.id == w.id) { l.push(w); l.sort_by(|a, b| a.id.cmp(&b.id)); } }
         }
+        if !fresh { let _ = write_atomic(&marker, art::ART_VERSION.to_string().as_bytes()); }
     });
 }
