@@ -226,6 +226,29 @@ pub fn keep_top_free(height_px: i32) -> bool {
     true
 }
 
+/// Maximised windows on the main screen that still reach under the bar (they were maximised before
+/// the bar reserved its strip) are maximised again, so they fit below it with their buttons visible.
+/// Does nothing until Windows has the strip reserved, so it can never loop.
+pub fn fit_maximized(hwnds: &[isize], height_px: i32) {
+    if work_area().top < height_px { return }
+    unsafe {
+        let primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        for &raw in hwnds {
+            let h = HWND(raw as *mut c_void);
+            if !IsZoomed(h).as_bool() || MonitorFromWindow(h, windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST) != primary { continue }
+            // The visible frame (GetWindowRect includes invisible resize borders).
+            let mut r = RECT::default();
+            let visible = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(h, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32).is_ok();
+            if !visible { let _ = GetWindowRect(h, &mut r); r.top += 8; }
+            if r.top < height_px - 2 {
+                let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+                let _ = ShowWindow(h, SW_SHOWMAXIMIZED);
+            }
+        }
+    }
+}
+
 /// Gives the top strip back to other windows (when the bar quits).
 pub fn release_top(height_px: i32) {
     let mut r = work_area();
@@ -320,6 +343,10 @@ pub fn fullscreen_app_active() -> bool {
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() || fg == GetDesktopWindow() || fg == GetShellWindow() { return false }
+        // A maximised window is not fullscreen, even when the taskbar is hidden and it fills the screen.
+        if IsZoomed(fg).as_bool() { return false }
+        let ex = GetWindowLongW(fg, GWL_STYLE) as u32;
+        if ex & WS_CAPTION.0 == WS_CAPTION.0 { return false }
         let mut r = RECT::default();
         if GetWindowRect(fg, &mut r).is_err() { return false }
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };

@@ -202,6 +202,8 @@ impl Bar {
             if !full {
                 sys::keep_top_free(self.bar_px);
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
+                let hwnds: Vec<isize> = self.wins.iter().map(|w| w.hwnd).collect();
+                sys::fit_maximized(&hwnds, self.bar_px);
             }
         }
         // The theme's own wallpaper as soon as it is drawn, on first start.
