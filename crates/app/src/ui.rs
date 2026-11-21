@@ -676,11 +676,11 @@ impl Bar {
         let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let names: Vec<&str> = std::iter::once(art::ORIGINALS_NAME).chain(COLLECTIONS.iter().map(|c| c.name))
-                .chain(github::PACKS.iter().map(|p| p.name)).collect();
+                .chain(github::packs().iter().map(|p| p.name)).collect();
             for name in names {
                 if name == COLLECTIONS[0].name { ui.add_space(4.0); ui.label(RichText::new("FROM WALLHAVEN.CC").color(c(t.accent)).size(11.0)); }
-                let pack = github::PACKS.iter().find(|p| p.name == name);
-                if pack.is_some() && name == github::PACKS[0].name {
+                let pack = github::packs().iter().find(|p| p.name == name);
+                if pack.is_some() && name == github::packs()[0].name {
                     ui.add_space(4.0);
                     ui.label(RichText::new(format!("FROM GITHUB · {}", github::REPO.to_uppercase())).color(c(t.accent)).size(11.0));
                 }
