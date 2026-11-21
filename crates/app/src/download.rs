@@ -13,12 +13,14 @@ pub struct Progress {
 }
 
 fn agent() -> ureq::Agent {
-    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls).build();
+    // Windows' own certificate store (the default, a bundled list, does not work with native-tls on Windows).
+    let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls)
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
     ureq::Agent::config_builder()
         .tls_config(tls)
         .https_only(true)
         .timeout_global(Some(Duration::from_secs(60)))
-        .user_agent("RoninBar/0.1 (+https://github.com/AEX0TIC/Ronin-bar)")
+        .user_agent("RoninBar/0.2 (+https://github.com/AEX0TIC/Ronin-bar)")
         .build()
         .into()
 }
@@ -64,4 +66,35 @@ fn fetch_one(agent: &ureq::Agent, store: &Store, w: &Wallpaper) -> Result<(), St
     write_atomic(&store.thumb_file(w), &thumb).map_err(|e| e.to_string())?;
     write_atomic(&store.wallpaper_file(w), &full).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The five built-in Ronin wallpapers, ready in `ready` as they are drawn (the current theme's first).
+/// They are drawn at the screen's resolution once, then reused.
+pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, ready: Arc<Mutex<Vec<Wallpaper>>>) {
+    use ronin_core::{art, theme::THEMES};
+    std::thread::spawn(move || {
+        let mut order: Vec<usize> = (0..THEMES.len()).collect();
+        order.sort_by_key(|&i| THEMES[i].id != first_theme);
+        for i in order {
+            let t = &THEMES[i];
+            let id = art::ORIGINAL_IDS[i];
+            let w = Wallpaper {
+                id: id.to_string(), collection: art::ORIGINALS_NAME.to_string(), url: format!("{id}.png"), thumb: String::new(),
+                page: String::new(), resolution: format!("{}x{}", screen.0, screen.1),
+            };
+            let have = store.wallpaper_file(&w).is_file() && store.thumb_file(&w).is_file();
+            if !have {
+                let save = |path: std::path::PathBuf, wd: u32, ht: u32, fmt: image::ImageFormat| -> Option<()> {
+                    let img = image::RgbImage::from_raw(wd, ht, art::wallpaper(t, wd, ht))?;
+                    let tmp = path.with_extension("tmp");
+                    std::fs::create_dir_all(path.parent()?).ok()?;
+                    img.save_with_format(&tmp, fmt).ok()?;
+                    std::fs::rename(&tmp, &path).ok()
+                };
+                if save(store.thumb_file(&w), 244, 138, image::ImageFormat::Jpeg).is_none()
+                    || save(store.wallpaper_file(&w), screen.0, screen.1, image::ImageFormat::Png).is_none() { continue }
+            }
+            if let Ok(mut l) = ready.lock() { if !l.iter().any(|x| x.id == w.id) { l.push(w); l.sort_by(|a, b| a.id.cmp(&b.id)); } }
+        }
+    });
 }

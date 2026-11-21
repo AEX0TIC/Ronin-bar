@@ -2,6 +2,7 @@
 //! any machine. No `unsafe` code is allowed in this crate.
 #![forbid(unsafe_code)]
 
+pub mod art;
 pub mod dock;
 pub mod settings;
 pub mod theme;

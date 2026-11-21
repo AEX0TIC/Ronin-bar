@@ -14,7 +14,9 @@ use windows::Win32::System::Power::{GetSystemPowerStatus, SetSuspendState, SYSTE
 use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_POWEROFF, EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetSystemTimes, OpenProcessToken};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
+use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN};
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use winreg::{enums::*, RegKey};
 
@@ -88,6 +90,7 @@ pub fn snapshot() -> Original {
         system_uses_light_theme: reg_dword(PERSONALIZE, "SystemUsesLightTheme"),
         accent_color: reg_dword(DWM, "AccentColor"),
         accent_color_menu: reg_dword(ACCENT, "AccentColorMenu"),
+        taskbar_state: Some(taskbar_state()),
     }
 }
 
@@ -98,6 +101,7 @@ pub fn restore(o: &Original) {
     restore_dword(DWM, "AccentColor", o.accent_color);
     restore_dword(ACCENT, "AccentColorMenu", o.accent_color_menu);
     broadcast_theme_change();
+    show_taskbar(o.taskbar_state);
     let p = wide(&o.wallpaper);
     unsafe { let _ = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(p.as_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
 }
@@ -199,8 +203,112 @@ pub fn appbar_register(hwnd: HWND, height_px: i32) -> bool {
         d.rc.bottom = d.rc.top + height_px;
         SHAppBarMessage(ABM_SETPOS, &mut d);
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), d.rc.left, d.rc.top, d.rc.right - d.rc.left, height_px, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        true
     }
+    keep_top_free(height_px);
+    true
+}
+
+fn work_area() -> RECT {
+    let mut r = RECT::default();
+    unsafe { let _ = SystemParametersInfoW(SPI_GETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    r
+}
+
+/// Makes sure the top `height_px` of the primary screen is outside the work area, so maximised
+/// windows (and their close / minimise / maximise buttons) start below the bar. The AppBar
+/// registration normally does this; when Windows has not applied it, the work area is set directly
+/// and maximised windows are told to fit it. Returns true if it had to change anything.
+pub fn keep_top_free(height_px: i32) -> bool {
+    let mut r = work_area();
+    if r.top >= height_px || r.right <= r.left { return false }
+    r.top = height_px;
+    unsafe { let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SPIF_SENDCHANGE); }
+    true
+}
+
+/// Gives the top strip back to other windows (when the bar quits).
+pub fn release_top(height_px: i32) {
+    let mut r = work_area();
+    if r.top != height_px { return }
+    r.top = 0;
+    unsafe { let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SPIF_SENDCHANGE); }
+}
+
+// ───── the Windows taskbar ─────
+/// Every Windows taskbar (one per screen).
+fn taskbars() -> Vec<HWND> {
+    let mut v = Vec::new();
+    unsafe {
+        if let Ok(h) = FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()) { if !h.is_invalid() { v.push(h); } }
+        let mut after: Option<HWND> = None;
+        while let Ok(h) = FindWindowExW(None, after, w!("Shell_SecondaryTrayWnd"), PCWSTR::null()) {
+            if h.is_invalid() || v.len() > 16 { break }
+            v.push(h);
+            after = Some(h);
+        }
+    }
+    v
+}
+
+fn tray_data() -> Option<APPBARDATA> {
+    let tray = unsafe { FindWindowW(w!("Shell_TrayWnd"), PCWSTR::null()).ok()? };
+    Some(APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: tray, ..Default::default() })
+}
+
+/// The taskbar's auto-hide / always-on-top state.
+pub fn taskbar_state() -> u32 {
+    tray_data().map(|mut d| unsafe { SHAppBarMessage(ABM_GETSTATE, &mut d) as u32 }).unwrap_or(ABS_ALWAYSONTOP)
+}
+
+fn set_taskbar_state(state: u32) {
+    if let Some(mut d) = tray_data() {
+        d.lParam = LPARAM(state as isize);
+        unsafe { SHAppBarMessage(ABM_SETSTATE, &mut d); }
+    }
+}
+
+static TASKBAR_HIDDEN: AtomicBool = AtomicBool::new(false);
+static TASKBAR_BEFORE: AtomicU32 = AtomicU32::new(ABS_ALWAYSONTOP);
+
+/// Hides the Windows taskbar while the bar runs: auto-hide frees the bottom of the screen, and
+/// the taskbar windows are hidden. Called again now and then, because Explorer can bring it back.
+/// `before` is the state to put back afterwards.
+pub fn hide_taskbar(before: u32) {
+    if !TASKBAR_HIDDEN.swap(true, Ordering::SeqCst) {
+        TASKBAR_BEFORE.store(before, Ordering::SeqCst);
+        set_taskbar_state(ABS_AUTOHIDE);
+    }
+    for t in taskbars() { unsafe { if IsWindowVisible(t).as_bool() { let _ = ShowWindow(t, SW_HIDE); } } }
+}
+
+/// Brings the Windows taskbar back as it was. Safe to call any number of times.
+pub fn show_taskbar(state: Option<u32>) {
+    let before = TASKBAR_BEFORE.load(Ordering::SeqCst);
+    let was_hidden = TASKBAR_HIDDEN.swap(false, Ordering::SeqCst);
+    for t in taskbars() { unsafe { let _ = ShowWindow(t, SW_SHOWNA); } }
+    match state {
+        Some(s) => set_taskbar_state(s),
+        None if was_hidden => set_taskbar_state(before),
+        None => {}
+    }
+}
+
+// ───── Windows shortcuts ─────
+/// Presses Win (+ `key`), e.g. Win for Start, Win+A for quick settings, Win+N for notifications.
+pub fn press_win(key: Option<u16>) {
+    let k = |vk: VIRTUAL_KEY, up: bool| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() }, ..Default::default() } },
+    };
+    let mut seq = vec![k(VK_LWIN, false)];
+    if let Some(c) = key { seq.push(k(VIRTUAL_KEY(c), false)); seq.push(k(VIRTUAL_KEY(c), true)); }
+    seq.push(k(VK_LWIN, true));
+    unsafe { SendInput(&seq, std::mem::size_of::<INPUT>() as i32); }
+}
+
+/// Opens Task Manager.
+pub fn task_manager() {
+    unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), None, None, SW_SHOWNORMAL); }
 }
 
 pub fn appbar_remove(hwnd: HWND) {
