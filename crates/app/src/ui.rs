@@ -407,7 +407,14 @@ impl Bar {
             ui.label(RichText::new("R O N I N").strong().size(15.0));
             ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).color(c(t.muted)).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("✕").size(13.0)).frame(false)).clicked() { self.panel = false; }
+                // Drawn, not a font character, so it shows on every PC.
+                let (r, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                if resp.hovered() { ui.painter().rect_filled(r, 7.0, c(t.accent).gamma_multiply(0.35)); }
+                let k = r.shrink(8.0);
+                let st = Stroke::new(1.6, c(t.fg));
+                ui.painter().line_segment([k.left_top(), k.right_bottom()], st);
+                ui.painter().line_segment([k.right_top(), k.left_bottom()], st);
+                if resp.clicked() { self.panel = false; }
             });
         });
         ui.add_space(4.0);
@@ -550,8 +557,8 @@ impl Bar {
                 ui.label(pins::display_name(p)).on_hover_text(p);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.small_button("unpin").clicked() { action = Some((i, 0)); }
-                    if ui.add_enabled(i + 1 < pinned.len(), egui::Button::new("→").small()).clicked() { action = Some((i, 1)); }
-                    if ui.add_enabled(i > 0, egui::Button::new("←").small()).clicked() { action = Some((i, -1)); }
+                    if ui.add_enabled(i + 1 < pinned.len(), egui::Button::new(">").small()).clicked() { action = Some((i, 1)); }
+                    if ui.add_enabled(i > 0, egui::Button::new("<").small()).clicked() { action = Some((i, -1)); }
                 });
             });
         }
