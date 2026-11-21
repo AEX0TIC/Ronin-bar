@@ -1,4 +1,5 @@
-//! Downloads the 30 wallpapers (and small previews) from Wallhaven in the background.
+//! Downloads wallpaper previews from Wallhaven in the background, each full picture when it is
+//! chosen, and draws the built-in Ronin wallpapers.
 use crate::store::{write_atomic, Store};
 use ronin_core::wallhaven::{self, Wallpaper, COLLECTIONS, MAX_BYTES, PER_COLLECTION};
 use std::sync::{Arc, Mutex};
@@ -46,8 +47,9 @@ fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
     unreachable!()
 }
 
-/// Fetches whatever is missing from the 30, adding each finished wallpaper to `catalog`.
-pub fn run(store: Arc<Store>, catalog: Arc<Mutex<Vec<Wallpaper>>>, progress: Arc<Mutex<Progress>>) {
+/// Brings every collection up to date with Wallhaven's current favourites: previews of new ones are
+/// downloaded, and ones that dropped out are removed (except `keep`, the wallpaper in use).
+pub fn run(store: Arc<Store>, catalog: Arc<Mutex<Vec<Wallpaper>>>, progress: Arc<Mutex<Progress>>, keep: String) {
     std::thread::spawn(move || {
         let set = |f: &dyn Fn(&mut Progress)| { if let Ok(mut p) = progress.lock() { f(&mut p); } };
         set(&|p| { p.running = true; p.error = None; p.done = 0; p.total = COLLECTIONS.len() * PER_COLLECTION; });
@@ -58,10 +60,19 @@ pub fn run(store: Arc<Store>, catalog: Arc<Mutex<Vec<Wallpaper>>>, progress: Arc
                 Ok(b) => wallhaven::parse_search(&String::from_utf8_lossy(&b), c.name),
                 Err(e) => { errors.push(e); continue }
             };
+            if found.is_empty() { continue }
+            // Drop this collection's wallpapers that are no longer among the favourites.
+            if let Ok(mut l) = catalog.lock() {
+                let (gone, rest): (Vec<Wallpaper>, Vec<Wallpaper>) = l.drain(..)
+                    .partition(|w| w.collection == c.name && w.id != keep && !found.iter().any(|f| f.id == w.id));
+                *l = rest;
+                for w in gone { let _ = std::fs::remove_file(store.thumb_file(&w)); let _ = std::fs::remove_file(store.wallpaper_file(&w)); }
+                store.save_catalog(&l);
+            }
             for w in found {
                 let have = catalog.lock().map(|l| l.iter().any(|x| x.id == w.id)).unwrap_or(false);
                 if !have {
-                    match fetch_one(&agent, &store, &w) {
+                    match fetch_preview(&agent, &store, &w) {
                         Ok(()) => if let Ok(mut l) = catalog.lock() { l.push(w); store.save_catalog(&l); },
                         Err(e) => errors.push(e),
                     }
@@ -74,14 +85,25 @@ pub fn run(store: Arc<Store>, catalog: Arc<Mutex<Vec<Wallpaper>>>, progress: Arc
     });
 }
 
-fn fetch_one(agent: &ureq::Agent, store: &Store, w: &Wallpaper) -> Result<(), String> {
-    let full = get(agent, &w.url, MAX_BYTES as u64 + 1)?;
-    if !wallhaven::is_image(&full) { return Err(format!("{}: not a JPEG/PNG image", w.id)) }
+fn fetch_preview(agent: &ureq::Agent, store: &Store, w: &Wallpaper) -> Result<(), String> {
     let thumb = get(agent, &w.thumb, 2 * 1024 * 1024)?;
     if !wallhaven::is_image(&thumb) { return Err(format!("{}: preview is not an image", w.id)) }
-    write_atomic(&store.thumb_file(w), &thumb).map_err(|e| e.to_string())?;
-    write_atomic(&store.wallpaper_file(w), &full).map_err(|e| e.to_string())?;
-    Ok(())
+    write_atomic(&store.thumb_file(w), &thumb).map_err(|e| e.to_string())
+}
+
+/// What a full-picture download ended with: the wallpaper id, and an error if it failed.
+pub type Fetched = Arc<Mutex<Option<(String, Result<(), String>)>>>;
+
+/// Downloads one wallpaper's full picture in the background.
+pub fn full(store: Arc<Store>, w: Wallpaper, done: Fetched) {
+    std::thread::spawn(move || {
+        let r = (|| {
+            let bytes = get(&agent(), &w.url, MAX_BYTES as u64 + 1)?;
+            if !wallhaven::is_image(&bytes) { return Err(format!("{}: not a JPEG/PNG image", w.id)) }
+            write_atomic(&store.wallpaper_file(&w), &bytes).map_err(|e| e.to_string())
+        })();
+        if let Ok(mut d) = done.lock() { *d = Some((w.id, r)); }
+    });
 }
 
 /// The five built-in Ronin wallpapers, ready in `ready` as they are drawn (the current theme's first).

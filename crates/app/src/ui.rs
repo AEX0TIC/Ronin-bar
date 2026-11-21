@@ -32,6 +32,10 @@ pub struct Bar {
     catalog: Arc<Mutex<Vec<Wallpaper>>>,
     originals: Arc<Mutex<Vec<Wallpaper>>>,
     progress: Arc<Mutex<download::Progress>>,
+    /// The wallpaper whose full picture is downloading, and where the download reports back.
+    fetching: Option<String>,
+    fetched: download::Fetched,
+    fetch_error: Option<String>,
     stats: Arc<Mutex<worker::Stats>>,
     tx: Sender<worker::Cmd>,
     hwnd: Option<HWND>,
@@ -97,10 +101,10 @@ impl Bar {
         let (w, h, scale) = sys::primary_screen();
         download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone());
         if catalog.lock().map(|l| l.len()).unwrap_or(0) < COLLECTIONS.len() * PER_COLLECTION {
-            download::run(store.clone(), catalog.clone(), progress.clone());
+            download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, progress, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
+        Bar { store, settings, catalog, originals, progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -116,13 +120,21 @@ impl Bar {
         l
     }
 
+    /// Sets a wallpaper; one whose full picture is not here yet is downloaded first, then set.
     fn set_wallpaper(&mut self, id: &str) {
-        if let Some(w) = self.walls().into_iter().find(|w| w.id == id) {
-            if sys::set_wallpaper(&self.store.wallpaper_file(&w)) {
+        let Some(w) = self.walls().into_iter().find(|w| w.id == id) else { return };
+        let file = self.store.wallpaper_file(&w);
+        if file.is_file() {
+            if sys::set_wallpaper(&file) {
                 self.settings.wallpaper = w.id;
                 self.last_change = Instant::now();
                 self.save();
             }
+        } else if !w.url.is_empty() && art::original_theme(&w.id).is_none() {
+            self.last_change = Instant::now();
+            self.fetch_error = None;
+            self.fetching = Some(w.id.clone());
+            download::full(self.store.clone(), w, self.fetched.clone());
         }
     }
 
@@ -206,6 +218,14 @@ impl Bar {
     }
 
     fn tick(&mut self) {
+        let done = self.fetched.lock().ok().and_then(|mut d| d.take());
+        if let Some((id, r)) = done {
+            // Only set it if it is still the one asked for last.
+            if self.fetching.as_deref() == Some(id.as_str()) {
+                self.fetching = None;
+                match r { Ok(()) => self.set_wallpaper(&id), Err(e) => self.fetch_error = Some(e) }
+            }
+        }
         if self.wins_at.elapsed() >= Duration::from_millis(400) {
             self.wins = dock::windows(&self.wins);
             self.wins_at = Instant::now();
@@ -632,13 +652,18 @@ impl Bar {
             });
         });
         if p.running {
-            ui.label(RichText::new(format!("Downloading anime wallpapers from wallhaven.cc…  {}/{}", p.done, p.total)).color(c(t.muted)).size(12.0));
+            ui.label(RichText::new(format!("Getting previews of the most-loved anime wallpapers from wallhaven.cc…  {}/{}", p.done, p.total)).color(c(t.muted)).size(12.0));
         } else if p.error.is_some() && downloaded < COLLECTIONS.len() * PER_COLLECTION {
-            ui.label(RichText::new(format!("{} of {} anime wallpapers downloaded. Check the internet connection and try again.", downloaded, COLLECTIONS.len() * PER_COLLECTION)).color(c(t.accent)).size(12.0))
+            ui.label(RichText::new(format!("{} of {} anime wallpapers ready. Check the internet connection and try again.", downloaded, COLLECTIONS.len() * PER_COLLECTION)).color(c(t.accent)).size(12.0))
                 .on_hover_text(p.error.clone().unwrap_or_default());
         }
-        if !p.running && downloaded < COLLECTIONS.len() * PER_COLLECTION && ui.button("Download the anime wallpapers").clicked() {
-            download::run(self.store.clone(), self.catalog.clone(), self.progress.clone());
+        if self.fetching.is_some() {
+            ui.label(RichText::new("Downloading the full picture…").color(c(t.muted)).size(12.0));
+        } else if let Some(e) = &self.fetch_error {
+            ui.label(RichText::new("That wallpaper could not be downloaded. Try again in a minute.").color(c(t.accent)).size(12.0)).on_hover_text(e.clone());
+        }
+        if !p.running && downloaded < COLLECTIONS.len() * PER_COLLECTION && ui.button("Get the anime wallpapers").clicked() {
+            download::run(self.store.clone(), self.catalog.clone(), self.progress.clone(), self.settings.wallpaper.clone());
         }
         ui.add_space(4.0);
         let ctx = ui.ctx().clone();

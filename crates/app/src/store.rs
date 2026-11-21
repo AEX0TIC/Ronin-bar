@@ -22,11 +22,11 @@ impl Store {
     }
     pub fn save_settings(&self, s: &Settings) { let _ = write_atomic(&self.settings_file(), s.to_json().as_bytes()); }
 
-    /// Wallpapers whose image is on disk.
+    /// Wallpapers whose preview is on disk (the full picture is downloaded when it is chosen).
     pub fn load_catalog(&self) -> Vec<Wallpaper> {
         let list: Vec<Wallpaper> = std::fs::read_to_string(self.catalog_file()).ok()
             .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
-        list.into_iter().filter(|w| ronin_core::wallhaven::is_id(&w.id) && self.wallpaper_file(w).is_file()).collect()
+        list.into_iter().filter(|w| ronin_core::wallhaven::is_id(&w.id) && self.thumb_file(w).is_file()).collect()
     }
     pub fn save_catalog(&self, list: &[Wallpaper]) {
         if let Ok(j) = serde_json::to_string_pretty(list) { let _ = write_atomic(&self.catalog_file(), j.as_bytes()); }
