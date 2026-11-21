@@ -5,7 +5,7 @@ use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Str
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
 use ronin_core::wallhaven::{self, Wallpaper, COLLECTIONS, PER_COLLECTION};
-use ronin_core::{art, dock as pins};
+use ronin_core::{art, dock as pins, github};
 use std::collections::HashMap;
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,6 +31,9 @@ pub struct Bar {
     settings: Settings,
     catalog: Arc<Mutex<Vec<Wallpaper>>>,
     originals: Arc<Mutex<Vec<Wallpaper>>>,
+    /// Downloaded pictures from the GitHub packs, and how each pack's download is going.
+    packs: Arc<Mutex<Vec<Wallpaper>>>,
+    pack_states: download::PackStates,
     progress: Arc<Mutex<download::Progress>>,
     /// The wallpaper whose full picture is downloading, and where the download reports back.
     fetching: Option<String>,
@@ -97,6 +100,7 @@ impl Bar {
         let (stats, tx) = worker::start();
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
+        let packs = Arc::new(Mutex::new(store.load_packs()));
         let progress = Arc::new(Mutex::new(download::Progress::default()));
         let (w, h, scale) = sys::primary_screen();
         download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone());
@@ -104,7 +108,7 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -113,10 +117,11 @@ impl Bar {
     fn save(&self) { self.store.save_settings(&self.settings); }
     fn open(&mut self, tab: Tab) { if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; } }
 
-    /// Built-in wallpapers first, then the downloaded ones.
+    /// Built-in wallpapers first, then wallhaven's, then the GitHub packs'.
     fn walls(&self) -> Vec<Wallpaper> {
         let mut l = self.originals.lock().map(|l| l.clone()).unwrap_or_default();
         l.extend(self.catalog.lock().map(|l| l.clone()).unwrap_or_default());
+        l.extend(self.packs.lock().map(|l| l.clone()).unwrap_or_default());
         l
     }
 
@@ -670,15 +675,41 @@ impl Bar {
         ui.add_space(4.0);
         let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let names: Vec<&str> = std::iter::once(art::ORIGINALS_NAME).chain(COLLECTIONS.iter().map(|c| c.name)).collect();
+            let names: Vec<&str> = std::iter::once(art::ORIGINALS_NAME).chain(COLLECTIONS.iter().map(|c| c.name))
+                .chain(github::PACKS.iter().map(|p| p.name)).collect();
             for name in names {
+                if name == COLLECTIONS[0].name { ui.add_space(4.0); ui.label(RichText::new("FROM WALLHAVEN.CC").color(c(t.accent)).size(11.0)); }
+                let pack = github::PACKS.iter().find(|p| p.name == name);
+                if pack.is_some() && name == github::PACKS[0].name {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(format!("FROM GITHUB · {}", github::REPO.to_uppercase())).color(c(t.accent)).size(11.0));
+                }
                 let items: Vec<&Wallpaper> = list.iter().filter(|w| w.collection == name).collect();
-                ui.label(RichText::new(format!("{name}  ·  {}", items.len())).strong());
+                ui.horizontal(|ui| {
+                    match pack {
+                        Some(p) => { ui.label(RichText::new(format!("{name}  ·  {}/{}", items.len(), p.files.len())).strong()); }
+                        None => { ui.label(RichText::new(format!("{name}  ·  {}", items.len())).strong()); }
+                    }
+                    if let Some(p) = pack {
+                        let st = self.pack_states.lock().ok().and_then(|m| m.get(p.name).cloned()).unwrap_or_default();
+                        if st.running {
+                            ui.label(RichText::new(format!("downloading {}/{}", st.done, st.total)).color(c(t.muted)).size(12.0));
+                        } else if items.len() < p.files.len() {
+                            let left = p.files.len() - items.len();
+                            if ui.small_button(format!("get {left} (about {} MB)", left * 2)).clicked() {
+                                download::pack(self.store.clone(), p, self.packs.clone(), self.pack_states.clone());
+                            }
+                            if let Some(e) = st.error { ui.label(RichText::new("some failed, try again").color(c(t.accent)).size(12.0)).on_hover_text(e); }
+                        }
+                    }
+                });
                 ui.horizontal_wrapped(|ui| {
                     for w in items {
                         let current = w.id == self.settings.wallpaper;
                         let size = Vec2::new(122.0, 69.0);
-                        let tip = if w.page.is_empty() { format!("{} · drawn by Ronin Bar", w.collection) } else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
+                        let tip = if w.page.is_empty() { format!("{} · drawn by Ronin Bar", w.collection) }
+                            else if w.resolution.is_empty() { format!("{}\n{}", w.collection, w.page) }
+                            else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
                         let r = match self.thumb(&ctx, w) {
                             Some(tex) => ui.add(egui::Button::image(egui::Image::new((tex.id(), size)).corner_radius(8.0)).selected(current)),
                             None => {
@@ -693,7 +724,7 @@ impl Bar {
                 });
                 ui.add_space(8.0);
             }
-            ui.label(RichText::new("The anime wallpapers come from wallhaven.cc and belong to their artists; they are downloaded to this PC for personal use. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
+            ui.label(RichText::new("Wallpapers from wallhaven.cc and from the dharmx/walls collection on GitHub belong to their artists; they are downloaded to this PC for personal use only, and hovering one shows where it comes from. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
         });
     }
 

@@ -37,6 +37,8 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 
 **80 anime wallpapers** in 8 collections: Samurai, Anime cars, Anime scenery, Cyberpunk city, Night sky, Cherry blossom, Rainy streets and Sunset, each the 10 most-favourited of all time on [Wallhaven](https://wallhaven.cc). Previews arrive in the background on first start; a full picture is downloaded when you choose it. They are not stored in this repository, because they belong to their artists. Only the anime category and safe-for-work images are used. Previous / next / random, or change automatically every 15 min to 3 h.
 
+**86 more from GitHub** in 8 packs hand-picked from the [dharmx/walls](https://github.com/dharmx/walls) collection: Anime art (16), Painted skies, Mountains, Fog & forests, Nature, Minimal, Flowers and Cities. Each pack downloads when you click **get** (about 2 MB a picture), from files pinned to one commit so they can never change. They belong to their artists and are downloaded for personal use only.
+
 **9 themes**: Ronin (ink and crimson), Sakura Night, Neon Tokyo, Midnight Gold, Ember, Oni Violet, Jade Temple, and two light ones, Matcha Paper and Washi. Each colours the dock and sets Windows' dark/light mode and accent colour.
 
 ## Install

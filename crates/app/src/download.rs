@@ -140,3 +140,48 @@ pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, rea
         if !fresh { let _ = write_atomic(&marker, art::ART_VERSION.to_string().as_bytes()); }
     });
 }
+
+/// How far a GitHub pack's download is.
+#[derive(Clone, Debug, Default)]
+pub struct PackProgress {
+    pub running: bool,
+    pub done: usize,
+    pub total: usize,
+    pub error: Option<String>,
+}
+pub type PackStates = Arc<Mutex<std::collections::HashMap<String, PackProgress>>>;
+
+/// Downloads a GitHub pack's pictures (pinned files, checked to be real images) and makes their
+/// previews here; each one joins `ready` as soon as it is in.
+pub fn pack(store: Arc<Store>, pack: &'static ronin_core::github::Pack, ready: Arc<Mutex<Vec<Wallpaper>>>, states: PackStates) {
+    std::thread::spawn(move || {
+        let list = ronin_core::github::wallpapers(pack);
+        let set = |f: &dyn Fn(&mut PackProgress)| {
+            if let Ok(mut m) = states.lock() { f(m.entry(pack.name.to_string()).or_default()); }
+        };
+        set(&|p| { p.running = true; p.done = 0; p.total = list.len(); p.error = None; });
+        let agent = agent();
+        let mut errors = Vec::new();
+        for w in list {
+            let have = store.wallpaper_file(&w).is_file() && store.thumb_file(&w).is_file();
+            if !have {
+                let r = (|| -> Result<(), String> {
+                    let bytes = get(&agent, &w.url, MAX_BYTES as u64 + 1)?;
+                    if !wallhaven::is_image(&bytes) { return Err(format!("{}: not a JPEG/PNG image", w.id)) }
+                    let img = image::load_from_memory(&bytes).map_err(|e| format!("{}: {e}", w.id))?;
+                    let thumb = img.thumbnail(320, 180).into_rgb8();
+                    let tmp = store.thumb_file(&w).with_extension("tmp");
+                    std::fs::create_dir_all(tmp.parent().ok_or("no folder")?).map_err(|e| e.to_string())?;
+                    thumb.save_with_format(&tmp, image::ImageFormat::Jpeg).map_err(|e| e.to_string())?;
+                    write_atomic(&store.wallpaper_file(&w), &bytes).map_err(|e| e.to_string())?;
+                    std::fs::rename(&tmp, store.thumb_file(&w)).map_err(|e| e.to_string())
+                })();
+                if let Err(e) = r { errors.push(e); set(&|p| p.done += 1); continue }
+            }
+            if let Ok(mut l) = ready.lock() { if !l.iter().any(|x| x.id == w.id) { l.push(w); } }
+            set(&|p| p.done += 1);
+        }
+        let err = (!errors.is_empty()).then(|| format!("{} could not be downloaded (first: {})", errors.len(), errors[0]));
+        set(&|p| { p.running = false; p.error = err.clone(); });
+    });
+}
