@@ -33,7 +33,7 @@ fn main() {
 
     if !install::running_installed() {
         let dir = install::install_dir();
-        let q = format!("Install Ronin Bar for your Windows account?\n\nEverything goes into one folder:\n{}\n\nIt puts a smart dock at the top of the screen in place of the Windows taskbar (you can turn that off), and downloads 30 anime wallpapers. Uninstall any time from Settings → Apps.", dir.display());
+        let q = format!("Install Ronin Bar for your Windows account?\n\nEverything goes into one folder:\n{}\n\nIt puts a smart dock at the top of the screen in place of the Windows taskbar (you can turn that off), and brings 80 anime wallpapers from wallhaven.cc. Uninstall any time from Settings → Apps.", dir.display());
         if !sys::ask("Install Ronin Bar", &q) { return }
         if let Some(bar) = sys::find_window(ui::TITLE) { sys::close_window(bar); std::thread::sleep(std::time::Duration::from_millis(1500)); }
         match install::install() {

@@ -1,6 +1,7 @@
-//! The 30 wallpapers: 10 samurai, 10 anime cars and 10 anime scenes, from Wallhaven's public API
-//! (anime category, safe-for-work only). They are downloaded on the user's PC for personal use;
-//! nothing is redistributed. Every URL and file is checked before it is used.
+//! The anime wallpapers: eight collections of the most-favourited anime wallpapers on Wallhaven's
+//! public API (anime category, safe-for-work only). Previews are downloaded first; each full
+//! picture only when it is chosen. Everything stays on the user's PC for personal use; nothing is
+//! redistributed. Every URL and file is checked before it is used.
 use serde::{Deserialize, Serialize};
 
 /// A style of wallpaper and the search that finds it.
@@ -10,21 +11,26 @@ pub struct Collection {
     pub query: &'static str,
 }
 
-pub const COLLECTIONS: [Collection; 3] = [
+pub const COLLECTIONS: [Collection; 8] = [
     Collection { name: "Samurai", query: "samurai" },
     Collection { name: "Anime cars", query: "car" },
     Collection { name: "Anime scenery", query: "landscape" },
+    Collection { name: "Cyberpunk city", query: "cyberpunk+city" },
+    Collection { name: "Night sky", query: "night+sky" },
+    Collection { name: "Cherry blossom", query: "cherry+blossom" },
+    Collection { name: "Rainy streets", query: "rain+street" },
+    Collection { name: "Sunset", query: "sunset" },
 ];
 
-/// Wallpapers per collection (3 × 10 = 30).
+/// Wallpapers per collection (8 × 10 = 80).
 pub const PER_COLLECTION: usize = 10;
 /// Largest file accepted.
 pub const MAX_BYTES: usize = 25 * 1024 * 1024;
 
 /// Search for one collection: anime category only (`categories=010`), safe for work only
-/// (`purity=100`), the most-favourited first, at least 1920×1080, landscape screens.
+/// (`purity=100`), the most-favourited of all time first, at least 1920×1080, landscape screens.
 pub fn search_url(c: &Collection) -> String {
-    format!("https://wallhaven.cc/api/v1/search?q={}&categories=010&purity=100&sorting=toplist&order=desc&atleast=1920x1080&ratios=16x9,16x10", c.query)
+    format!("https://wallhaven.cc/api/v1/search?q={}&categories=010&purity=100&sorting=favorites&order=desc&atleast=1920x1080&ratios=16x9,16x10", c.query)
 }
 
 /// One wallpaper as kept in the catalogue.
@@ -142,9 +148,12 @@ mod tests {
 
     #[test]
     fn searches_are_anime_sfw_only() {
-        assert_eq!(COLLECTIONS.len() * PER_COLLECTION, 30);
-        for c in COLLECTIONS {
-            let u = search_url(&c);
+        assert_eq!(COLLECTIONS.len() * PER_COLLECTION, 80);
+        for (i, c) in COLLECTIONS.iter().enumerate() {
+            assert!(COLLECTIONS.iter().skip(i + 1).all(|o| o.name != c.name), "duplicate {}", c.name);
+            assert!(!c.query.is_empty() && c.query.chars().all(|ch| ch.is_ascii_lowercase() || ch == '+'), "{} must be URL-safe", c.query);
+            let u = search_url(c);
+            assert!(u.contains("sorting=favorites"));
             assert!(u.starts_with("https://wallhaven.cc/api/v1/search?"));
             assert!(u.contains("categories=010") && u.contains("purity=100"));
         }
