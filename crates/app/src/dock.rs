@@ -1,0 +1,172 @@
+//! The dock: Start-menu apps, open windows, and their icons, using plain Windows APIs.
+use ronin_core::dock;
+use std::ffi::c_void;
+use std::path::{Path, PathBuf};
+use windows::core::{w, BOOL, HSTRING, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HGDIOBJ,
+};
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::System::Threading::{
+    GetCurrentProcessId, OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+};
+use windows::Win32::UI::Shell::{SHGetFileInfoW, ShellExecuteW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON};
+use windows::Win32::UI::WindowsAndMessaging::*;
+
+/// A top-level app window, as the taskbar would show it.
+#[derive(Clone, Debug)]
+pub struct Win {
+    pub hwnd: isize,
+    pub title: String,
+    pub exe: Option<String>,
+}
+
+fn h(hwnd: isize) -> HWND { HWND(hwnd as *mut c_void) }
+
+/// Every Start-menu shortcut (yours and all users'), named and sorted, without uninstallers and readmes.
+pub fn start_menu_apps() -> Vec<(String, String)> {
+    let mut roots = Vec::new();
+    for var in ["APPDATA", "ProgramData"] {
+        if let Some(base) = std::env::var_os(var) { roots.push(PathBuf::from(base).join(r"Microsoft\Windows\Start Menu\Programs")); }
+    }
+    let mut out: Vec<(String, String)> = Vec::new();
+    fn walk(dir: &Path, depth: u8, out: &mut Vec<(String, String)>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_dir() && depth < 4 { walk(&p, depth + 1, out); continue }
+            let s = p.to_string_lossy().to_string();
+            if ft.is_file() && s.to_ascii_lowercase().ends_with(".lnk") && dock::pinnable(&s) {
+                let name = dock::display_name(&s);
+                if !dock::is_clutter(&name) && !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) { out.push((name, s)); }
+            }
+        }
+    }
+    for r in roots { walk(&r, 0, &mut out); }
+    out.sort_by_key(|(n, _)| n.to_lowercase());
+    out
+}
+
+/// Opens a pinned shortcut or program the way Explorer would (no shell, no arguments).
+pub fn launch(path: &str) -> bool {
+    if !dock::pinnable(path) || !Path::new(path).is_file() { return false }
+    let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(path), None, None, SW_SHOWNORMAL) };
+    r.0 as isize > 32
+}
+
+fn exe_of(hwnd: HWND) -> Option<String> {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(p);
+        ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+fn is_app_window(hwnd: HWND, own_pid: u32) -> bool {
+    unsafe {
+        if !IsWindowVisible(hwnd).as_bool() { return false }
+        if GetWindow(hwnd, GW_OWNER).map(|o| !o.0.is_null()).unwrap_or(false) { return false }
+        let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+        if ex & WS_EX_TOOLWINDOW.0 != 0 { return false }
+        let mut cloaked = 0u32;
+        if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut c_void, 4).is_ok() && cloaked != 0 { return false }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != own_pid && GetWindowTextLengthW(hwnd) > 0
+    }
+}
+
+unsafe extern "system" fn collect(hwnd: HWND, lp: LPARAM) -> BOOL {
+    let list = unsafe { &mut *(lp.0 as *mut Vec<isize>) };
+    list.push(hwnd.0 as isize);
+    BOOL(1)
+}
+
+/// Open app windows in taskbar order, without the bar's own windows. `exe` is filled from `known` when the
+/// window was seen before, so a process is opened only once per window.
+pub fn windows(known: &[Win]) -> Vec<Win> {
+    let mut all: Vec<isize> = Vec::new();
+    unsafe { let _ = EnumWindows(Some(collect), LPARAM(&mut all as *mut Vec<isize> as isize)); }
+    let own = unsafe { GetCurrentProcessId() };
+    let mut out = Vec::new();
+    for raw in all {
+        let hwnd = h(raw);
+        if !is_app_window(hwnd, own) { continue }
+        let mut buf = [0u16; 256];
+        let n = unsafe { GetWindowTextW(hwnd, &mut buf) }.max(0) as usize;
+        let title = String::from_utf16_lossy(&buf[..n]);
+        let exe = match known.iter().find(|k| k.hwnd == raw) { Some(k) => k.exe.clone(), None => exe_of(hwnd) };
+        out.push(Win { hwnd: raw, title, exe });
+    }
+    out
+}
+
+pub fn foreground() -> isize { unsafe { GetForegroundWindow().0 as isize } }
+pub fn is_minimized(hwnd: isize) -> bool { unsafe { IsIconic(h(hwnd)).as_bool() } }
+
+/// Brings a window to the front, restoring it if it was minimised.
+pub fn focus(hwnd: isize) {
+    unsafe {
+        if IsIconic(h(hwnd)).as_bool() { let _ = ShowWindow(h(hwnd), SW_RESTORE); }
+        let _ = SetForegroundWindow(h(hwnd));
+    }
+}
+pub fn minimize(hwnd: isize) { unsafe { let _ = ShowWindow(h(hwnd), SW_MINIMIZE); } }
+/// Asks the window to close, like its X button (the app may still ask to save).
+pub fn close(hwnd: isize) { unsafe { let _ = PostMessageW(Some(h(hwnd)), WM_CLOSE, WPARAM(0), LPARAM(0)); } }
+
+/// The icon Explorer shows for a file, as RGBA pixels.
+pub fn icon_rgba(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    unsafe {
+        let mut info = SHFILEINFOW::default();
+        let ok = SHGetFileInfoW(&HSTRING::from(path), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32, SHGFI_ICON | SHGFI_LARGEICON);
+        if ok == 0 || info.hIcon.is_invalid() { return None }
+        let px = icon_pixels(info.hIcon);
+        let _ = DestroyIcon(info.hIcon);
+        px
+    }
+}
+
+unsafe fn icon_pixels(icon: HICON) -> Option<(usize, usize, Vec<u8>)> {
+    let mut ii = ICONINFO::default();
+    unsafe { GetIconInfo(icon, &mut ii).ok()? };
+    let result = (|| {
+        if ii.hbmColor.is_invalid() { return None }
+        let mut bm = BITMAP::default();
+        if unsafe { GetObjectW(HGDIOBJ(ii.hbmColor.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut BITMAP as *mut c_void)) } == 0 { return None }
+        let (wd, ht) = (bm.bmWidth.clamp(1, 256) as usize, bm.bmHeight.clamp(1, 256) as usize);
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: wd as i32, biHeight: -(ht as i32),
+                biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut px = vec![0u8; wd * ht * 4];
+        let dc = unsafe { CreateCompatibleDC(None) };
+        let lines = unsafe { GetDIBits(dc, ii.hbmColor, 0, ht as u32, Some(px.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS) };
+        unsafe { let _ = DeleteDC(dc); }
+        if lines == 0 { return None }
+        let has_alpha = px.chunks_exact(4).any(|p| p[3] != 0);
+        for p in px.chunks_exact_mut(4) {
+            p.swap(0, 2); // BGRA → RGBA
+            if !has_alpha { p[3] = 255; }
+        }
+        Some((wd, ht, px))
+    })();
+    unsafe {
+        if !ii.hbmColor.is_invalid() { let _ = DeleteObject(HGDIOBJ(ii.hbmColor.0)); }
+        if !ii.hbmMask.is_invalid() { let _ = DeleteObject(HGDIOBJ(ii.hbmMask.0)); }
+    }
+    result
+}

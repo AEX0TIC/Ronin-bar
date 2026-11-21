@@ -1,0 +1,246 @@
+//! Everything that talks to Windows. Only Windows' own APIs are used: no helper programs.
+use ronin_core::{settings::Original, theme::Theme};
+use std::ffi::c_void;
+use std::path::Path;
+use windows::core::{w, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, LUID, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+use windows::Win32::Media::Audio::{eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator};
+use windows::Win32::Networking::NetworkListManager::{INetworkListManager, NetworkListManager};
+use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
+use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
+use windows::Win32::System::Power::{GetSystemPowerStatus, SetSuspendState, SYSTEM_POWER_STATUS};
+use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_POWEROFF, EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER};
+use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetSystemTimes, OpenProcessToken};
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA};
+use windows::Win32::UI::WindowsAndMessaging::*;
+use winreg::{enums::*, RegKey};
+
+const PERSONALIZE: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+const DWM: &str = r"Software\Microsoft\Windows\DWM";
+const ACCENT: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent";
+
+fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() }
+
+// ───── registry ─────
+fn hkcu() -> RegKey { RegKey::predef(HKEY_CURRENT_USER) }
+pub fn reg_dword(path: &str, name: &str) -> Option<u32> { hkcu().open_subkey(path).ok()?.get_value(name).ok() }
+fn set_dword(path: &str, name: &str, v: u32) { if let Ok((k, _)) = hkcu().create_subkey(path) { let _ = k.set_value(name, &v); } }
+fn restore_dword(path: &str, name: &str, v: Option<u32>) {
+    match v {
+        Some(v) => set_dword(path, name, v),
+        None => if let Ok(k) = hkcu().open_subkey_with_flags(path, KEY_SET_VALUE) { let _ = k.delete_value(name); },
+    }
+}
+
+// ───── one instance only ─────
+/// True if this is the only Ronin Bar running. The mutex lives as long as the process.
+pub fn single_instance() -> bool {
+    unsafe {
+        let h = CreateMutexW(None, true, w!("Local\\RoninBar.Bar"));
+        h.is_ok() && windows::Win32::Foundation::GetLastError() != windows::Win32::Foundation::ERROR_ALREADY_EXISTS
+    }
+}
+
+// ───── wallpaper & theme ─────
+pub fn current_wallpaper() -> String {
+    let mut buf = [0u16; 520];
+    unsafe {
+        let _ = SystemParametersInfoW(SPI_GETDESKWALLPAPER, buf.len() as u32, Some(buf.as_mut_ptr() as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+    }
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..n])
+}
+
+pub fn set_wallpaper(path: &Path) -> bool {
+    if let Ok((k, _)) = hkcu().create_subkey(r"Control Panel\Desktop") {
+        let _ = k.set_value("WallpaperStyle", &"10");   // Fill
+        let _ = k.set_value("TileWallpaper", &"0");
+    }
+    let p = wide(&path.display().to_string());
+    unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(p.as_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE).is_ok() }
+}
+
+fn broadcast_theme_change() {
+    let s = wide("ImmersiveColorSet");
+    unsafe { let _ = SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, WPARAM(0), LPARAM(s.as_ptr() as isize), SMTO_ABORTIFHUNG, 300, None); }
+}
+
+/// Windows dark/light mode and accent colour for this theme.
+pub fn apply_theme(t: &Theme) {
+    let light = u32::from(!t.dark);
+    set_dword(PERSONALIZE, "AppsUseLightTheme", light);
+    set_dword(PERSONALIZE, "SystemUsesLightTheme", light);
+    let [r, g, b] = t.accent;
+    let abgr = 0xff00_0000 | (u32::from(b) << 16) | (u32::from(g) << 8) | u32::from(r);
+    set_dword(DWM, "AccentColor", abgr);
+    set_dword(ACCENT, "AccentColorMenu", abgr);
+    broadcast_theme_change();
+}
+
+/// What Windows looks like now (taken once, before Ronin Bar changes anything).
+pub fn snapshot() -> Original {
+    Original {
+        wallpaper: current_wallpaper(),
+        apps_use_light_theme: reg_dword(PERSONALIZE, "AppsUseLightTheme"),
+        system_uses_light_theme: reg_dword(PERSONALIZE, "SystemUsesLightTheme"),
+        accent_color: reg_dword(DWM, "AccentColor"),
+        accent_color_menu: reg_dword(ACCENT, "AccentColorMenu"),
+    }
+}
+
+/// Puts Windows back exactly as `snapshot` found it.
+pub fn restore(o: &Original) {
+    restore_dword(PERSONALIZE, "AppsUseLightTheme", o.apps_use_light_theme);
+    restore_dword(PERSONALIZE, "SystemUsesLightTheme", o.system_uses_light_theme);
+    restore_dword(DWM, "AccentColor", o.accent_color);
+    restore_dword(ACCENT, "AccentColorMenu", o.accent_color_menu);
+    broadcast_theme_change();
+    let p = wide(&o.wallpaper);
+    unsafe { let _ = SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(p.as_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE); }
+}
+
+// ───── system stats ─────
+fn filetime(f: windows::Win32::Foundation::FILETIME) -> u64 { (u64::from(f.dwHighDateTime) << 32) | u64::from(f.dwLowDateTime) }
+
+/// (idle, kernel, user) CPU time counters; CPU % comes from the difference of two samples.
+pub fn cpu_times() -> (u64, u64, u64) {
+    let (mut i, mut k, mut u) = Default::default();
+    unsafe { let _ = GetSystemTimes(Some(&mut i), Some(&mut k), Some(&mut u)); }
+    (filetime(i), filetime(k), filetime(u))
+}
+
+/// Memory in use, percent.
+pub fn ram_percent() -> u8 {
+    let mut m = MEMORYSTATUSEX { dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32, ..Default::default() };
+    unsafe { let _ = GlobalMemoryStatusEx(&mut m); }
+    m.dwMemoryLoad.min(100) as u8
+}
+
+/// (percent, charging), or None on PCs without a battery.
+pub fn battery() -> Option<(u8, bool)> {
+    let mut s = SYSTEM_POWER_STATUS::default();
+    unsafe { GetSystemPowerStatus(&mut s).ok()?; }
+    if s.BatteryFlag & 128 != 0 || s.BatteryLifePercent > 100 { return None }   // no battery / unknown
+    Some((s.BatteryLifePercent, s.ACLineStatus == 1))
+}
+
+/// Initialises COM on the calling thread (the worker thread owns all COM objects).
+pub fn com_init() { unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); } }
+
+pub fn network_manager() -> Option<INetworkListManager> { unsafe { CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL).ok() } }
+pub fn online(n: &INetworkListManager) -> bool { unsafe { n.IsConnectedToInternet().map(|b| b.as_bool()).unwrap_or(false) } }
+
+pub fn volume_endpoint() -> Option<IAudioEndpointVolume> {
+    unsafe {
+        let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let d = e.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+        d.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
+    }
+}
+pub fn volume_get(v: &IAudioEndpointVolume) -> Option<(f32, bool)> {
+    unsafe { Some((v.GetMasterVolumeLevelScalar().ok()?, v.GetMute().ok()?.as_bool())) }
+}
+pub fn volume_set(v: &IAudioEndpointVolume, level: f32) { unsafe { let _ = v.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), std::ptr::null()); } }
+pub fn mute_set(v: &IAudioEndpointVolume, mute: bool) { unsafe { let _ = v.SetMute(mute, std::ptr::null()); } }
+
+// ───── power ─────
+pub fn lock() { unsafe { let _ = LockWorkStation(); } }
+pub fn sleep() { unsafe { let _ = SetSuspendState(false, false, false); } }
+
+fn enable_shutdown_privilege() {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &mut token).is_err() { return }
+        let mut luid = LUID::default();
+        if LookupPrivilegeValueW(None, w!("SeShutdownPrivilege"), &mut luid).is_ok() {
+            let mut tp = TOKEN_PRIVILEGES { PrivilegeCount: 1, ..Default::default() };
+            tp.Privileges[0].Luid = luid;
+            tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+            let _ = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+        }
+        let _ = CloseHandle(token);
+    }
+}
+pub fn restart() { enable_shutdown_privilege(); unsafe { let _ = ExitWindowsEx(EWX_REBOOT, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED); } }
+pub fn shut_down() { enable_shutdown_privilege(); unsafe { let _ = ExitWindowsEx(EWX_POWEROFF, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED); } }
+
+// ───── the bar window ─────
+pub fn find_window(title: &str) -> Option<HWND> {
+    let t = HSTRING::from(title);
+    unsafe { FindWindowW(PCWSTR::null(), &t).ok().filter(|h| !h.is_invalid()) }
+}
+
+/// The primary monitor's size in physical pixels, and its DPI scale.
+pub fn primary_screen() -> (i32, i32, f32) {
+    unsafe {
+        let w = GetSystemMetrics(SM_CXSCREEN);
+        let h = GetSystemMetrics(SM_CYSCREEN);
+        let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
+        (w, h, dpi as f32 / 96.0)
+    }
+}
+
+fn appbar_data(hwnd: HWND) -> APPBARDATA {
+    APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: ABE_TOP, ..Default::default() }
+}
+
+/// Reserves a strip at the top of the primary screen for the bar, so maximised windows stay below
+/// it (like a second taskbar), and moves the bar there. Returns false if Windows refused.
+pub fn appbar_register(hwnd: HWND, height_px: i32) -> bool {
+    unsafe {
+        let mut d = appbar_data(hwnd);
+        if SHAppBarMessage(ABM_NEW, &mut d) == 0 { return false }
+        let (w, _, _) = primary_screen();
+        d.rc = RECT { left: 0, top: 0, right: w, bottom: height_px };
+        SHAppBarMessage(ABM_QUERYPOS, &mut d);
+        d.rc.bottom = d.rc.top + height_px;
+        SHAppBarMessage(ABM_SETPOS, &mut d);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), d.rc.left, d.rc.top, d.rc.right - d.rc.left, height_px, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        true
+    }
+}
+
+pub fn appbar_remove(hwnd: HWND) {
+    unsafe { let mut d = appbar_data(hwnd); SHAppBarMessage(ABM_REMOVE, &mut d); }
+}
+
+/// True while a fullscreen app or game covers the primary screen (the bar then steps back).
+pub fn fullscreen_app_active() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || fg == GetDesktopWindow() || fg == GetShellWindow() { return false }
+        let mut r = RECT::default();
+        if GetWindowRect(fg, &mut r).is_err() { return false }
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if !GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTOPRIMARY), &mut mi).as_bool() { return false }
+        let m = mi.rcMonitor;
+        r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
+    }
+}
+
+/// Puts the bar above or below other windows.
+pub fn set_topmost(hwnd: HWND, on: bool) {
+    let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    unsafe { let _ = SetWindowPos(hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+}
+
+pub fn close_window(hwnd: HWND) { unsafe { let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)); } }
+
+/// A plain Windows question box. Returns true for Yes/OK.
+pub fn ask(title: &str, text: &str) -> bool {
+    let (t, m) = (HSTRING::from(title), HSTRING::from(text));
+    unsafe { MessageBoxW(None, &m, &t, MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND) == IDYES }
+}
+pub fn tell(title: &str, text: &str) {
+    let (t, m) = (HSTRING::from(title), HSTRING::from(text));
+    unsafe { MessageBoxW(None, &m, &t, MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND); }
+}
+
+/// Local date and time: (weekday 0=Sunday, day, month 1-12, hour, minute).
+pub fn local_time() -> (u16, u16, u16, u16, u16) {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    (t.wDayOfWeek, t.wDay, t.wMonth, t.wHour, t.wMinute)
+}

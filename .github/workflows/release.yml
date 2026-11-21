@@ -1,0 +1,28 @@
+# Publish a release: Actions → release → Run workflow (on main).
+# Builds ronin-bar.exe on Windows and publishes it with its SHA-256 as v<version from Cargo.toml>.
+name: release
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { persist-credentials: false }
+      - name: Test and build
+        run: |
+          cargo test --locked --workspace
+          cargo build --locked --release -p ronin-bar
+      - name: Publish
+        shell: pwsh
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+\.\d+)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/ronin-bar.exe "dist/Ronin-Bar-$v.exe"
+          $h = (Get-FileHash "dist/Ronin-Bar-$v.exe" -Algorithm SHA256).Hash.ToLower()
+          "$h  Ronin-Bar-$v.exe" | Out-File "dist/Ronin-Bar-$v.exe.sha256" -Encoding ascii -NoNewline
+          $notes = "Download **Ronin-Bar-$v.exe** and run it: it asks once, then installs itself into one folder.`n`nUninstall from Settings → Apps → Ronin Bar.`n`nSHA-256: ``$h``"
+          gh release create "v$v" dist/* --title "Ronin Bar $v" --notes $notes --target $env:GITHUB_SHA
