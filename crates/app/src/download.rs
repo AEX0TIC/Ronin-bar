@@ -141,6 +141,9 @@ pub fn originals(store: Arc<Store>, screen: (u32, u32), first_theme: String, rea
     });
 }
 
+/// Pictures downloaded per click on a category's "get" button.
+pub const BATCH: usize = 24;
+
 /// How far a GitHub pack's download is.
 #[derive(Clone, Debug, Default)]
 pub struct PackProgress {
@@ -151,11 +154,13 @@ pub struct PackProgress {
 }
 pub type PackStates = Arc<Mutex<std::collections::HashMap<String, PackProgress>>>;
 
-/// Downloads a GitHub pack's pictures (pinned files, checked to be real images) and makes their
-/// previews here; each one joins `ready` as soon as it is in.
+/// Downloads the next `BATCH` pictures of a GitHub category that are not here yet (pinned files,
+/// checked to be real images) and makes their previews here; each joins `ready` as soon as it is in.
 pub fn pack(store: Arc<Store>, pack: &'static ronin_core::github::Pack, ready: Arc<Mutex<Vec<Wallpaper>>>, states: PackStates) {
     std::thread::spawn(move || {
-        let list = ronin_core::github::wallpapers(pack);
+        let list: Vec<Wallpaper> = ronin_core::github::wallpapers(pack).into_iter()
+            .filter(|w| !(store.wallpaper_file(w).is_file() && store.thumb_file(w).is_file()))
+            .take(BATCH).collect();
         let set = |f: &dyn Fn(&mut PackProgress)| {
             if let Ok(mut m) = states.lock() { f(m.entry(pack.name.to_string()).or_default()); }
         };

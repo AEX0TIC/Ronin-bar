@@ -174,10 +174,35 @@ impl Bar {
         tex
     }
 
+    /// One wallpaper in the panel. Its preview is only read from disk while it is on screen, so
+    /// categories with hundreds of pictures stay light.
+    fn tile(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, w: &Wallpaper) -> egui::Response {
+        let t = self.theme();
+        let size = Vec2::new(122.0, 69.0);
+        let (rect, r) = ui.allocate_exact_size(size + vec2(10.0, 10.0), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let current = w.id == self.settings.wallpaper;
+            let frame = if current { c(t.accent).gamma_multiply(0.55) } else if r.hovered() { c(t.surface) } else { c(t.surface).gamma_multiply(0.6) };
+            ui.painter().rect_filled(rect.shrink(1.0), 10.0, frame);
+            let inner = Rect::from_center_size(rect.center(), size);
+            match self.thumb(ctx, w) {
+                Some(tex) => { egui::Image::new((tex.id(), size)).corner_radius(8.0).paint_at(ui, inner); }
+                None => { ui.painter().text(inner.center(), egui::Align2::CENTER_CENTER, "loading", FontId::proportional(11.0), c(t.muted)); }
+            }
+        }
+        let tip = if art::original_theme(&w.id).is_some() { format!("{} · drawn by Ronin Bar", w.collection) }
+            else if w.page.is_empty() { w.collection.clone() }
+            else if w.resolution.is_empty() { format!("{}\n{}", w.collection, w.page) }
+            else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
+        r.on_hover_text(tip)
+    }
+
     /// A wallpaper's preview, read straight from disk (no background loader that can stall).
     /// Missing files are not remembered, so a preview appears as soon as its download finishes.
     fn thumb(&mut self, ctx: &egui::Context, w: &Wallpaper) -> Option<egui::TextureHandle> {
         if let Some(t) = self.thumbs.get(&w.id) { return t.clone() }
+        // Keep memory small: previews scrolled away are read again when they come back.
+        if self.thumbs.len() >= 240 { self.thumbs.clear(); }
         let path = self.store.thumb_file(w);
         if !path.is_file() { return None }
         let tex = image::open(&path).ok().map(|img| {
@@ -685,44 +710,35 @@ impl Bar {
                     ui.label(RichText::new(format!("FROM GITHUB · {}", github::REPO.to_uppercase())).color(c(t.accent)).size(11.0));
                 }
                 let items: Vec<&Wallpaper> = list.iter().filter(|w| w.collection == name).collect();
-                ui.horizontal(|ui| {
-                    match pack {
-                        Some(p) => { ui.label(RichText::new(format!("{name}  ·  {}/{}", items.len(), p.files.len())).strong()); }
-                        None => { ui.label(RichText::new(format!("{name}  ·  {}", items.len())).strong()); }
-                    }
+                let title = match pack {
+                    Some(p) => format!("{name}  ·  {}/{}", items.len(), p.files.len()),
+                    None => format!("{name}  ·  {}", items.len()),
+                };
+                // The built-in and wallhaven sets start open; the big GitHub categories start closed.
+                egui::CollapsingHeader::new(RichText::new(title).strong()).id_salt(name).default_open(pack.is_none()).show(ui, |ui| {
                     if let Some(p) = pack {
                         let st = self.pack_states.lock().ok().and_then(|m| m.get(p.name).cloned()).unwrap_or_default();
-                        if st.running {
-                            ui.label(RichText::new(format!("downloading {}/{}", st.done, st.total)).color(c(t.muted)).size(12.0));
-                        } else if items.len() < p.files.len() {
-                            let left = p.files.len() - items.len();
-                            if ui.small_button(format!("get {left} (about {} MB)", left * 2)).clicked() {
-                                download::pack(self.store.clone(), p, self.packs.clone(), self.pack_states.clone());
+                        ui.horizontal(|ui| {
+                            if st.running {
+                                ui.label(RichText::new(format!("downloading {}/{}", st.done, st.total)).color(c(t.muted)).size(12.0));
+                            } else if items.len() < p.files.len() {
+                                let next = (p.files.len() - items.len()).min(download::BATCH);
+                                let label = if items.is_empty() { format!("get {next} (about {} MB)", next * 2) } else { format!("get {next} more (about {} MB)", next * 2) };
+                                if ui.small_button(label).clicked() {
+                                    download::pack(self.store.clone(), p, self.packs.clone(), self.pack_states.clone());
+                                }
+                                if let Some(e) = st.error { ui.label(RichText::new("some failed, try again").color(c(t.accent)).size(12.0)).on_hover_text(e); }
                             }
-                            if let Some(e) = st.error { ui.label(RichText::new("some failed, try again").color(c(t.accent)).size(12.0)).on_hover_text(e); }
+                        });
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        for w in items {
+                            let r = self.tile(ui, &ctx, w);
+                            if r.clicked() { let id = w.id.clone(); self.set_wallpaper(&id); }
                         }
-                    }
+                    });
                 });
-                ui.horizontal_wrapped(|ui| {
-                    for w in items {
-                        let current = w.id == self.settings.wallpaper;
-                        let size = Vec2::new(122.0, 69.0);
-                        let tip = if w.page.is_empty() { format!("{} · drawn by Ronin Bar", w.collection) }
-                            else if w.resolution.is_empty() { format!("{}\n{}", w.collection, w.page) }
-                            else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
-                        let r = match self.thumb(&ctx, w) {
-                            Some(tex) => ui.add(egui::Button::image(egui::Image::new((tex.id(), size)).corner_radius(8.0)).selected(current)),
-                            None => {
-                                let (rect, r) = ui.allocate_exact_size(size + vec2(8.0, 8.0), Sense::click());
-                                ui.painter().rect_filled(rect.shrink(4.0), 8.0, c(t.surface));
-                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "loading", FontId::proportional(11.0), c(t.muted));
-                                r
-                            }
-                        }.on_hover_text(tip);
-                        if r.clicked() { let id = w.id.clone(); self.set_wallpaper(&id); }
-                    }
-                });
-                ui.add_space(8.0);
+                ui.add_space(4.0);
             }
             ui.label(RichText::new("Wallpapers from wallhaven.cc and from the dharmx/walls collection on GitHub belong to their artists; they are downloaded to this PC for personal use only, and hovering one shows where it comes from. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
         });
