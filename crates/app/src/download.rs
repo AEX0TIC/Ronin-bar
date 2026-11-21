@@ -25,9 +25,25 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// wallhaven.cc allows 45 requests a minute; one every 1.5 s stays well under that.
+const PAUSE: Duration = Duration::from_millis(1500);
+
+/// Downloads `url`, pacing requests and waiting it out (up to 3 times) when the site says
+/// "too many requests" or is briefly unavailable.
 fn get(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let mut r = agent.get(url).call().map_err(|e| format!("{url}: {e}"))?;
-    r.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| format!("{url}: {e}"))
+    let mut wait = Duration::from_secs(15);
+    for attempt in 0.. {
+        std::thread::sleep(PAUSE);
+        match agent.get(url).call() {
+            Ok(mut r) => return r.body_mut().with_config().limit(limit).read_to_vec().map_err(|e| format!("{url}: {e}")),
+            Err(ureq::Error::StatusCode(code)) if (code == 429 || code >= 500) && attempt < 3 => {
+                std::thread::sleep(wait);
+                wait *= 2;
+            }
+            Err(e) => return Err(format!("{url}: {e}")),
+        }
+    }
+    unreachable!()
 }
 
 /// Fetches whatever is missing from the 30, adding each finished wallpaper to `catalog`.
