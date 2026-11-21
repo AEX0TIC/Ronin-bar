@@ -202,6 +202,7 @@ impl Bar {
             if !full {
                 sys::keep_top_free(self.bar_px);
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
+                if let Some(h) = self.hwnd { sys::pin_top(h, self.bar_px); }
                 let hwnds: Vec<isize> = self.wins.iter().map(|w| w.hwnd).collect();
                 sys::fit_maximized(&hwnds, self.bar_px);
             }

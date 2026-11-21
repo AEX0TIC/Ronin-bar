@@ -15,7 +15,7 @@ use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_POWER
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetSystemTimes, OpenProcessToken};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA};
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use winreg::{enums::*, RegKey};
@@ -198,11 +198,11 @@ pub fn appbar_register(hwnd: HWND, height_px: i32) -> bool {
         let mut d = appbar_data(hwnd);
         if SHAppBarMessage(ABM_NEW, &mut d) == 0 { return false }
         let (w, _, _) = primary_screen();
+        // Always the very top of the screen. (Windows' suggested spot can be lower, e.g. while a bar
+        // that was closed without saying goodbye still holds the top; the bar must not sit under it.)
         d.rc = RECT { left: 0, top: 0, right: w, bottom: height_px };
-        SHAppBarMessage(ABM_QUERYPOS, &mut d);
-        d.rc.bottom = d.rc.top + height_px;
         SHAppBarMessage(ABM_SETPOS, &mut d);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), d.rc.left, d.rc.top, d.rc.right - d.rc.left, height_px, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, w, height_px, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
     keep_top_free(height_px);
     true
@@ -214,13 +214,23 @@ fn work_area() -> RECT {
     r
 }
 
-/// Makes sure the top `height_px` of the primary screen is outside the work area, so maximised
-/// windows (and their close / minimise / maximise buttons) start below the bar. The AppBar
-/// registration normally does this; when Windows has not applied it, the work area is set directly
-/// and maximised windows are told to fit it. Returns true if it had to change anything.
+/// Keeps the bar at the very top of the main screen, full width, if anything moved it.
+pub fn pin_top(hwnd: HWND, height_px: i32) {
+    let (w, _, _) = primary_screen();
+    let mut r = RECT::default();
+    unsafe {
+        if GetWindowRect(hwnd, &mut r).is_ok() && (r.left != 0 || r.top != 0 || r.right != w || r.bottom != height_px) {
+            let _ = SetWindowPos(hwnd, None, 0, 0, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
+        }
+    }
+}
+
+/// Makes the work area of the main screen start exactly where the bar ends, so maximised windows
+/// (with their title bar, tabs, and close / minimise / maximise buttons) sit right below the bar:
+/// not under it, and without a gap. Returns true if it had to change anything.
 pub fn keep_top_free(height_px: i32) -> bool {
     let mut r = work_area();
-    if r.top >= height_px || r.right <= r.left { return false }
+    if r.top == height_px || r.right <= r.left { return false }
     r.top = height_px;
     unsafe { let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SPIF_SENDCHANGE); }
     true
