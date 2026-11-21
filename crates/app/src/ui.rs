@@ -49,6 +49,8 @@ pub struct Bar {
     guard_at: Instant,
     /// The app window that was in front before the bar was clicked.
     active: isize,
+    /// Maximised windows re-fitted below the bar, and when.
+    refitted: HashMap<isize, Instant>,
     /// Icons by file path (`None` = Windows had none).
     icons: HashMap<String, Option<egui::TextureHandle>>,
     /// Start-menu apps, read when the Apps tab is first opened.
@@ -98,7 +100,7 @@ impl Bar {
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, progress, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
-              active: 0, icons: HashMap::new(), apps: None, query: String::new() }
+              active: 0, refitted: HashMap::new(), icons: HashMap::new(), apps: None, query: String::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
@@ -203,8 +205,15 @@ impl Bar {
                 sys::keep_top_free(self.bar_px);
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
                 if let Some(h) = self.hwnd { sys::pin_top(h, self.bar_px); }
-                let hwnds: Vec<isize> = self.wins.iter().map(|w| w.hwnd).collect();
-                sys::fit_maximized(&hwnds, self.bar_px);
+                // Each window is fixed at most once a minute, so an app that insists on its own
+                // position never flickers.
+                self.refitted.retain(|_, t| t.elapsed() < Duration::from_secs(60));
+                for w in &self.wins {
+                    if !self.refitted.contains_key(&w.hwnd) && sys::misfit_maximized(w.hwnd, self.bar_px) {
+                        sys::refit(w.hwnd);
+                        self.refitted.insert(w.hwnd, Instant::now());
+                    }
+                }
             }
         }
         // The theme's own wallpaper as soon as it is drawn, on first start.

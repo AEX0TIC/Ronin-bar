@@ -236,26 +236,30 @@ pub fn keep_top_free(height_px: i32) -> bool {
     true
 }
 
-/// Maximised windows on the main screen that still reach under the bar (they were maximised before
-/// the bar reserved its strip) are maximised again, so they fit below it with their buttons visible.
-/// Does nothing until Windows has the strip reserved, so it can never loop.
-pub fn fit_maximized(hwnds: &[isize], height_px: i32) {
-    if work_area().top < height_px { return }
+/// True for a maximised window on the main screen whose top edge is not where the bar ends
+/// (it was maximised before the bar took its place, so its title bar is under the bar or there is
+/// a gap). Only once the work area itself is right, so fixing it can never loop.
+pub fn misfit_maximized(raw: isize, height_px: i32) -> bool {
+    if work_area().top != height_px { return false }
     unsafe {
+        let h = HWND(raw as *mut c_void);
         let primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-        for &raw in hwnds {
-            let h = HWND(raw as *mut c_void);
-            if !IsZoomed(h).as_bool() || MonitorFromWindow(h, windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST) != primary { continue }
-            // The visible frame (GetWindowRect includes invisible resize borders).
-            let mut r = RECT::default();
-            let visible = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(h, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
-                &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32).is_ok();
-            if !visible { let _ = GetWindowRect(h, &mut r); r.top += 8; }
-            if r.top < height_px - 2 {
-                let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
-                let _ = ShowWindow(h, SW_SHOWMAXIMIZED);
-            }
-        }
+        if !IsZoomed(h).as_bool() || MonitorFromWindow(h, windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST) != primary { return false }
+        // The visible frame (GetWindowRect includes invisible resize borders).
+        let mut r = RECT::default();
+        let visible = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(h, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32).is_ok();
+        if !visible { let _ = GetWindowRect(h, &mut r); r.top += 8; }
+        (r.top - height_px).abs() > 2
+    }
+}
+
+/// Maximises a window again so it fits the current work area.
+pub fn refit(raw: isize) {
+    let h = HWND(raw as *mut c_void);
+    unsafe {
+        let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        let _ = ShowWindow(h, SW_SHOWMAXIMIZED);
     }
 }
 
