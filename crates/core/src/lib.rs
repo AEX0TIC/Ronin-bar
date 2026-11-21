@@ -4,6 +4,7 @@
 
 pub mod art;
 pub mod dock;
+pub mod github;
 pub mod settings;
 pub mod theme;
 pub mod wallhaven;
