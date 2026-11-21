@@ -1,0 +1,12 @@
+[package]
+name = "ronin-core"
+description = "Ronin Bar logic that needs no window: themes, settings, wallpaper catalogue and validation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
