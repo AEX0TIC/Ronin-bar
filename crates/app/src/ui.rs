@@ -707,7 +707,7 @@ impl Bar {
                 let pack = github::packs().iter().find(|p| p.name == name);
                 if pack.is_some() && name == github::packs()[0].name {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(format!("FROM GITHUB · {}", github::REPO.to_uppercase())).color(c(t.accent)).size(11.0));
+                    ui.label(RichText::new("FROM GITHUB").color(c(t.accent)).size(11.0));
                 }
                 let items: Vec<&Wallpaper> = list.iter().filter(|w| w.collection == name).collect();
                 let title = match pack {
@@ -740,7 +740,7 @@ impl Bar {
                 });
                 ui.add_space(4.0);
             }
-            ui.label(RichText::new("Wallpapers from wallhaven.cc and from the dharmx/walls collection on GitHub belong to their artists; they are downloaded to this PC for personal use only, and hovering one shows where it comes from. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
+            ui.label(RichText::new("Wallpapers from wallhaven.cc and GitHub belong to their artists; they are downloaded to this PC for personal use only. The Ronin originals are drawn by Ronin Bar itself.").color(c(t.muted)).size(11.0));
         });
     }
 
