@@ -53,6 +53,8 @@ pub struct Bar {
     refitted: HashMap<isize, Instant>,
     /// Icons by file path (`None` = Windows had none).
     icons: HashMap<String, Option<egui::TextureHandle>>,
+    /// Wallpaper previews by wallpaper id (`None` = the file could not be read).
+    thumbs: HashMap<String, Option<egui::TextureHandle>>,
     /// Start-menu apps, read when the Apps tab is first opened.
     apps: Option<Vec<(String, String)>>,
     query: String,
@@ -100,7 +102,7 @@ impl Bar {
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, progress, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
-              active: 0, refitted: HashMap::new(), icons: HashMap::new(), apps: None, query: String::new() }
+              active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
@@ -152,6 +154,21 @@ impl Bar {
         });
         if self.icons.len() > 400 { self.icons.clear(); }
         self.icons.insert(path.to_string(), tex.clone());
+        tex
+    }
+
+    /// A wallpaper's preview, read straight from disk (no background loader that can stall).
+    /// Missing files are not remembered, so a preview appears as soon as its download finishes.
+    fn thumb(&mut self, ctx: &egui::Context, w: &Wallpaper) -> Option<egui::TextureHandle> {
+        if let Some(t) = self.thumbs.get(&w.id) { return t.clone() }
+        let path = self.store.thumb_file(w);
+        if !path.is_file() { return None }
+        let tex = image::open(&path).ok().map(|img| {
+            let img = img.thumbnail(320, 180).into_rgba8();
+            let size = [img.width() as usize, img.height() as usize];
+            ctx.load_texture(format!("thumb-{}", w.id), egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw()), egui::TextureOptions::LINEAR)
+        });
+        self.thumbs.insert(w.id.clone(), tex.clone());
         tex
     }
 
@@ -624,6 +641,7 @@ impl Bar {
             download::run(self.store.clone(), self.catalog.clone(), self.progress.clone());
         }
         ui.add_space(4.0);
+        let ctx = ui.ctx().clone();
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let names: Vec<&str> = std::iter::once(art::ORIGINALS_NAME).chain(COLLECTIONS.iter().map(|c| c.name)).collect();
             for name in names {
@@ -631,11 +649,18 @@ impl Bar {
                 ui.label(RichText::new(format!("{name}  ·  {}", items.len())).strong());
                 ui.horizontal_wrapped(|ui| {
                     for w in items {
-                        let uri = format!("file://{}", self.store.thumb_file(w).display());
                         let current = w.id == self.settings.wallpaper;
-                        let img = egui::Image::new(uri).fit_to_exact_size(Vec2::new(122.0, 69.0)).corner_radius(8.0);
+                        let size = Vec2::new(122.0, 69.0);
                         let tip = if w.page.is_empty() { format!("{} · drawn by Ronin Bar", w.collection) } else { format!("{} · {}\n{}", w.collection, w.resolution, w.page) };
-                        let r = ui.add(egui::Button::image(img).selected(current)).on_hover_text(tip);
+                        let r = match self.thumb(&ctx, w) {
+                            Some(tex) => ui.add(egui::Button::image(egui::Image::new((tex.id(), size)).corner_radius(8.0)).selected(current)),
+                            None => {
+                                let (rect, r) = ui.allocate_exact_size(size + vec2(8.0, 8.0), Sense::click());
+                                ui.painter().rect_filled(rect.shrink(4.0), 8.0, c(t.surface));
+                                ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, "loading", FontId::proportional(11.0), c(t.muted));
+                                r
+                            }
+                        }.on_hover_text(tip);
                         if r.clicked() { let id = w.id.clone(); self.set_wallpaper(&id); }
                     }
                 });
