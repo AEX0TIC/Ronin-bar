@@ -13,6 +13,7 @@ use windows::Win32::Foundation::HWND;
 
 pub const TITLE: &str = "Ronin Bar";
 const PANEL_TITLE: &str = "Ronin Bar · control";
+const POPUP_TITLE: &str = "Ronin Bar · popup";
 /// Bar height in logical pixels.
 pub const BAR_HEIGHT: f32 = 36.0;
 /// Dock icon size and slot width in logical pixels.
@@ -22,6 +23,10 @@ const CLOCK_W: f32 = 170.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
+
+/// Ronin's own popups, opened from the bar in place of Windows' flyouts.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Popup { Calendar }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm { Sleep, Restart, ShutDown, Uninstall }
@@ -45,6 +50,13 @@ pub struct Bar {
     bar_px: i32,
     topmost: bool,
     panel: bool,
+    /// The open popup, the bar position it hangs from, when it opened, and the last one closed.
+    popup: Option<Popup>,
+    popup_x: f32,
+    popup_at: Instant,
+    popup_closed: Option<(Popup, Instant)>,
+    /// The month shown in the calendar.
+    cal: (i32, u32),
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -108,14 +120,34 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
     fn save(&self) { self.store.save_settings(&self.settings); }
-    fn open(&mut self, tab: Tab) { if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; } }
+    fn open(&mut self, tab: Tab) {
+        self.popup = None;
+        if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; }
+    }
+
+    /// Opens a popup under the bar item at `x`, or closes it if it is open. (A click on the bar
+    /// first takes focus from an open popup, which closes it; that click must not reopen it.)
+    fn toggle_popup(&mut self, p: Popup, x: f32) {
+        let just_closed = matches!(self.popup_closed, Some((q, at)) if q == p && at.elapsed() < Duration::from_millis(400));
+        if self.popup == Some(p) || just_closed { self.close_popup(); self.popup_closed = None; return }
+        self.panel = false;
+        self.popup = Some(p);
+        self.popup_x = x;
+        self.popup_at = Instant::now();
+        if p == Popup::Calendar { let (y, m, _) = sys::today(); self.cal = (y, m); }
+    }
+
+    fn close_popup(&mut self) {
+        if let Some(p) = self.popup.take() { self.popup_closed = Some((p, Instant::now())); }
+    }
 
     /// Built-in wallpapers first, then wallhaven's, then the GitHub packs'.
     fn walls(&self) -> Vec<Wallpaper> {
@@ -399,7 +431,7 @@ impl Bar {
             p.circle_filled(pos2(x0 + tw + 5.0, clock.center().y), 1.6, accent);
             p.galley(pos2(x0 + tw + 10.0, clock.center().y - dh / 2.0 + 0.5), date, muted);
         }
-        if cr.clicked() { sys::press_win(Some(b'N' as u16)); }
+        if cr.clicked() { self.toggle_popup(Popup::Calendar, clock.center().x); }
 
         ui.horizontal_centered(|ui| {
             ui.add_space(6.0);
@@ -462,6 +494,49 @@ impl Bar {
         // A fine accent line along the bottom edge.
         let y = full.bottom() - 0.5;
         ui.painter().line_segment([pos2(full.left(), y), pos2(full.right(), y)], Stroke::new(1.0, accent.gamma_multiply(0.45)));
+    }
+
+    // ───── popups ─────
+
+    fn pop_calendar(&mut self, ui: &mut egui::Ui) {
+        use ronin_core::calendar::{grid, shift, weekday, MONTHS, WEEKDAYS};
+        let t = self.theme();
+        let (ty, tm, td) = sys::today();
+        let (_, _, _, h, mi) = sys::local_time();
+        ui.label(RichText::new(format!("{h:02}:{mi:02}")).size(34.0).strong());
+        ui.label(RichText::new(format!("{}, {} {} {}", WEEKDAYS[weekday(ty, tm, td) as usize], td, MONTHS[(tm as usize + 11) % 12], ty)).color(c(t.muted)));
+        ui.add_space(10.0);
+        let (y, m) = self.cal;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} {}", MONTHS[(m as usize + 11) % 12], y)).strong().size(15.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(">").clicked() { self.cal = shift(y, m, 1); }
+                if (y, m) != (ty, tm) && ui.small_button("today").clicked() { self.cal = (ty, tm); }
+                if ui.small_button("<").clicked() { self.cal = shift(y, m, -1); }
+            });
+        });
+        ui.add_space(6.0);
+        let cell = vec2((ui.available_width() / 7.0).floor(), 34.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for d in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] {
+                let (r, _) = ui.allocate_exact_size(vec2(cell.x, 22.0), Sense::hover());
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, d, FontId::proportional(11.5), c(t.muted));
+            }
+        });
+        for week in grid(y, m) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (i, day) in week.iter().enumerate() {
+                    let (r, _) = ui.allocate_exact_size(cell, Sense::hover());
+                    let Some(d) = day else { continue };
+                    let today = (y, m, *d) == (ty, tm, td);
+                    if today { ui.painter().circle_filled(r.center(), 14.0, c(t.accent)); }
+                    let col = if today { c(t.bg) } else if i == 0 || i == 6 { c(t.muted) } else { c(t.fg) };
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, d.to_string(), FontId::proportional(13.0), col);
+                }
+            });
+        }
     }
 
     // ───── the control panel ─────
@@ -789,6 +864,28 @@ impl eframe::App for Bar {
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape))
             });
             if close { self.panel = false; }
+        }
+        if let Some(p) = self.popup {
+            let (w, h) = match p { Popup::Calendar => (330.0, 392.0) };
+            let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(POPUP_TITLE)
+                .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
+                .with_inner_size([w, h]).with_position(egui::pos2(x, BAR_HEIGHT + 6.0));
+            let id = egui::ViewportId::from_hash_of(("ronin-popup", p));
+            let fresh = self.popup_at.elapsed() < Duration::from_millis(120);
+            let close = ctx.show_viewport_immediate(id, builder, |ui, _class| {
+                let t = self.theme();
+                egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    match p { Popup::Calendar => self.pop_calendar(ui) }
+                });
+                // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
+                ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
+                    || (i.viewport().focused == Some(false) && !fresh && self.popup_at.elapsed() > Duration::from_millis(400)))
+            });
+            if fresh { ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus); }
+            if close { self.close_popup(); }
         }
     }
 

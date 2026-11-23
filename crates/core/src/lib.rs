@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 
 pub mod art;
+pub mod calendar;
 pub mod dock;
 pub mod github;
 pub mod settings;

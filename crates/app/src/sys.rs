@@ -389,6 +389,12 @@ pub fn tell(title: &str, text: &str) {
 }
 
 /// Local date and time: (weekday 0=Sunday, day, month 1-12, hour, minute).
+/// Today's date: (year, month, day).
+pub fn today() -> (i32, u32, u32) {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    (i32::from(t.wYear), u32::from(t.wMonth), u32::from(t.wDay))
+}
+
 pub fn local_time() -> (u16, u16, u16, u16, u16) {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     (t.wDayOfWeek, t.wDay, t.wMonth, t.wHour, t.wMinute)
