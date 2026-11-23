@@ -25,12 +25,14 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 ## Contents
 
 - [The bar](#the-bar)
+- [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)
 - [Quick settings](#quick-settings)
 - [Launcher, calendar and the other popups](#launcher-calendar-and-the-other-popups)
 - [Wallpapers](#wallpapers)
 - [Themes](#themes)
 - [Updates](#updates)
-- [Install](#install) · [Uninstall](#uninstall)
+- [Requirements](#requirements)
+- [Install](#install) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
 - [Privacy and safety](#privacy-and-safety)
 - [Build from source](#build-from-source)
 
@@ -46,7 +48,7 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 | 2 | **Dock** | Pinned apps open; open windows come to the front, or minimise if already in front | Right-click a pinned app to unpin it, or an open window to pin its app. Middle-click closes a window. A line marks the window in front; dimmed means minimised |
 | 3 | **Clock** | **Calendar**: today, a month view, and previous/next month | |
 | 4 | **CPU · RAM** | Task Manager | Live usage |
-| 5 | **Wi-Fi · Bluetooth · quick settings** | Three icons: **Wi-Fi** (networks: connect, disconnect, join with a password), **Bluetooth** (on/off and your paired devices, connected first) and **quick settings** (below) | Wi-Fi dims when you're offline; Bluetooth dims when it's off |
+| 5 | **Wi-Fi · Bluetooth · quick settings** | Three icons, each with its own popup: **Wi-Fi**, **Bluetooth** (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)) and **quick settings** | Wi-Fi dims when you're offline; Bluetooth dims when it's off |
 | 6 | **Battery** | **Battery**: charge, time left, battery saver, brightness | A bolt while charging |
 | 7 | **Sound** | **Sound**: volume slider and mute | Scroll to change the volume, right-click to mute |
 | 8 | **Wallpapers · themes · settings** | Opens that page of the Ronin panel | Right-click wallpapers for the next one |
@@ -55,6 +57,19 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 Each open window shows its own app icon. That includes Store apps such as Settings, Calculator and Photos, which the bar looks up by their app ID. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
 The bar steps aside while a fullscreen game or video is in front, and comes back after it.
+
+## Wi-Fi and Bluetooth
+
+Both popups work the same way: an on/off switch at the top, your list below, and a button on each row.
+
+| | **Wi-Fi** | **Bluetooth** |
+|---|---|---|
+| **Your list** | Nearby networks with signal bars, the connected one first | Your paired devices, connected ones first |
+| **Buttons** | **connect** / **disconnect**; a password box for a new secured network | **connect** / **disconnect** for headphones, speakers and headsets; **forget** removes a device |
+| **Adding** | Type the password once; Windows remembers the network | **search** finds devices in pairing mode, **pair** adds one (Windows asks for a PIN only if the device needs one) |
+| **More** | Network settings | Bluetooth settings |
+
+Mice, keyboards and phones connect by themselves when they're switched on, so they show their state without a connect button.
 
 ## Quick settings
 
@@ -81,7 +96,7 @@ Each popup opens under the item you clicked, in your theme. It closes with **Esc
 - **Launcher** (Ronin mark): every installed app, Store apps included, with real icons. Type to search; **Enter** opens the first match. Each app has a **Pin** button (**Unpin** once pinned). Pinned apps sit at the top, where the small **×** unpins them.
 - **Calendar** (clock): a large clock, today's date, and a month view with today marked.
 - **Sound**, **Battery** and **Power**: see [the bar](#the-bar).
-- **Wi-Fi** and **Bluetooth**: networks, and paired devices with their connection state.
+- **Wi-Fi** and **Bluetooth**: see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth).
 - **Ronin panel** (right-click the mark, or the buttons at the right of the bar): wallpapers, themes and settings.
 
 The popups are kept ready in the background, so they open instantly and update live as Wi-Fi, volume or battery change.
@@ -111,6 +126,19 @@ Ronin Bar updates itself, so you never need to download it from GitHub again.
 
 Only this repository's own release files are accepted, and only if their checksum matches.
 
+## Requirements
+
+| | |
+|---|---|
+| **Windows** | Windows 10 (version 1903 or newer) or Windows 11, 64-bit |
+| **Rights** | Your normal Windows account; no administrator needed |
+| **Internet** | Only for downloading wallpapers and updates. The bar, popups and Ronin wallpapers work offline |
+| **Disk** | About 6 MB for the program, plus about 2 MB per downloaded wallpaper |
+| **Optional hardware** | Wi-Fi adapter for the Wi-Fi popup, Bluetooth adapter for the Bluetooth popup, a laptop screen for the brightness slider (desktop monitors set their brightness on the monitor itself), a second screen for Project |
+| **Windows 11 extras** | Live captions needs Windows 11 22H2 or newer; on older Windows its tile is hidden |
+
+Nothing else needs to be installed: no runtime, no other app.
+
 ## Install
 
 1. Download **`Ronin-Bar-<version>.exe`** from [Releases](https://github.com/AEX0TIC/Ronin-bar/releases/latest).
@@ -132,6 +160,18 @@ Use **Settings → Apps → Ronin Bar → Uninstall**, or ⚙ **→ Uninstall** 
 - turns night light off;
 - removes the shortcut, the Settings → Apps entry and the startup entry;
 - deletes the folder.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| The Windows taskbar is gone after Ronin Bar was ended from Task Manager | Start Ronin Bar again and quit it from ⚙ → *Quit the bar*, or sign out and back in |
+| A window's buttons are under the bar | Maximise the window again; Ronin keeps the top strip free, but a few apps place themselves |
+| Bluetooth headphones won't connect | Make sure they're on and not connected to another device (a phone), then press **connect** again. Still nothing: **forget** them and **pair** them again |
+| A new device isn't found | Put it in pairing mode (usually by holding its power or Bluetooth button) and press **search again** |
+| An app shows the wrong icon | Hover it to see its name, and [open an issue](https://github.com/AEX0TIC/Ronin-bar/issues) with that name |
+| No update popup | ⚙ → Settings → Updates → **Check for updates**; check that *Tell me when a new version is out* is ticked |
+| No wallpapers download | They need internet access to wallhaven.cc and github.com |
 
 ## Privacy and safety
 
