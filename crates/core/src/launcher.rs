@@ -17,8 +17,12 @@ pub fn is_junk(name: &str, target: &str) -> bool {
         "performance monitor", "resource monitor", "recovery drive", "odbc", "iscsi", "memory diagnostic",
         "print management", "component services", "computer management", "local security policy",
         "steps recorder", "debuggable package", "debugger", "profiler", "sdk tools", "symbol",
+        // Codec settings and Linux shells.
+        " vfw", "codec", "wsl settings",
     ];
     if WORDS.iter().any(|w| n.contains(w)) { return true }
+    let first = n.split_whitespace().next().unwrap_or("");
+    if ["wsl", "bash", "ubuntu", "debian", "kali"].contains(&first) && n.split_whitespace().count() <= 3 && !n.contains("git") { return true }
     // A target that is a document, a web page, a script or an admin console.
     let t = target.to_lowercase();
     const ENDS: [&str; 22] = [
@@ -125,7 +129,8 @@ mod tests {
         assert!(is_system_tool(r"C:\Windows\System32\dfrgui.exe"));
         assert!(!is_system_tool(r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\notepad.exe"));
         assert!(!is_system_tool(r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe"));
-        for bad in ["Developer Command Prompt for VS 2019", "Windows PowerShell ISE", "Application Verifier (X64)", "Defragment and Optimize Drives", "MinGW Installer"] {
+        for ok in ["DaVinci Resolve", "Git Bash", "Steam", "VLC media player"] { assert!(!is_junk(ok, "x.exe"), "{ok}"); }
+        for bad in ["WSL", "WSL Settings", "x264 VFW (x64)", "Ubuntu 22.04 LTS", "x64 Native Tools Command Prompt for VS 2019", "Developer Command Prompt for VS 2019", "Windows PowerShell ISE", "Application Verifier (X64)", "Defragment and Optimize Drives", "MinGW Installer"] {
             assert!(is_junk(bad, "x.exe"), "{bad}");
         }
         assert!(is_launcher_link("steam://rungameid/2669320"));
