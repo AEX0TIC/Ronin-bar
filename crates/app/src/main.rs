@@ -48,19 +48,27 @@ fn main() {
         return;
     }
 
-    // Right after an update the old copy is still closing: wait for it (up to 15 s).
+    // Right after an update or a restart the old copy is still closing: wait for it (up to 15 s).
     let updated = std::env::args().any(|a| a == "--updated");
+    let restarts = restart_count();
     let mut alone = sys::single_instance();
     for _ in 0..50 {
-        if alone || !updated { break }
+        if alone || !(updated || restarts > 0) { break }
         std::thread::sleep(std::time::Duration::from_millis(300));
         alone = sys::single_instance();
     }
     if !alone { return }
+    // Coming back from a crash right after the PC woke up: give the graphics driver a moment.
+    if restarts > 0 { std::thread::sleep(std::time::Duration::from_secs(2)); }
+    let started = std::time::Instant::now();
     update::clean_up();
-    // Whatever happens, never leave the PC without a taskbar.
+    // Whatever happens, never leave the PC without a taskbar, and come back by itself.
     let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); sys::night_light(0); default_hook(info); }));
+    std::panic::set_hook(Box::new(move |info| {
+        sys::show_taskbar(None); sys::night_light(0);
+        default_hook(info);
+        restart(started, restarts);
+    }));
 
     let mut settings = store.load_settings();
     if settings.original.is_none() {
@@ -82,7 +90,31 @@ fn main() {
         glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
-    let _ = eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings)))));
+    // After sleep (or a driver update) Windows can reset the graphics card, and the bar's OpenGL
+    // drawing stops working: eframe then gives up with an error, or panics while switching to a
+    // popup's window. Neither can be recovered in place, so the bar starts itself again.
+    if eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings))))).is_err() {
+        sys::show_taskbar(None);
+        restart(started, restarts);
+    }
+}
+
+/// How many times in a row the bar has restarted itself (`--restarted N`; 0 for a normal start).
+#[cfg(windows)]
+fn restart_count() -> u32 {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter().position(|a| a == "--restarted").and_then(|i| args.get(i + 1)?.parse().ok()).unwrap_or(0)
+}
+
+/// Starts a fresh copy of the bar (which waits for this one to quit). A bar that keeps failing
+/// within a minute of starting stops after a few tries rather than restarting forever.
+#[cfg(windows)]
+fn restart(started: std::time::Instant, restarts: u32) {
+    let next = if started.elapsed() >= std::time::Duration::from_secs(60) { 1 } else { restarts + 1 };
+    if next > 5 { return }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--restarted").arg(next.to_string()).spawn();
+    }
 }
 
 /// The Ronin logo for the window (the .exe itself gets it from build.rs).
