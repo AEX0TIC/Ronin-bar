@@ -3,7 +3,7 @@ use eframe::egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps }
+pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps, Update }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, s: Stroke) {
     let n = ((a1 - a0).abs() * r / 2.0).ceil().max(6.0) as usize;
@@ -77,6 +77,12 @@ pub fn draw(p: &Painter, r: Rect, g: Glyph, col: Color32) {
             p.circle_stroke(c, 5.6 * u, s);
             let pts: Vec<Pos2> = (0..=24).map(|i| { let a = PI / 4.0 + PI * i as f32 / 24.0; c + vec2(a.cos(), -a.sin()) * 5.6 * u }).collect();
             p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+        }
+        Glyph::Update => {
+            // An arrow rising out of a tray.
+            p.line_segment([c + vec2(0.0, -6.5) * u, c + vec2(0.0, 2.5) * u], s);
+            p.add(Shape::line(vec![c + vec2(-3.6, -3.0) * u, c + vec2(0.0, -6.6) * u, c + vec2(3.6, -3.0) * u], s));
+            p.add(Shape::line(vec![c + vec2(-6.0, 1.5) * u, c + vec2(-6.0, 6.0) * u, c + vec2(6.0, 6.0) * u, c + vec2(6.0, 1.5) * u], s));
         }
         Glyph::Apps => {
             for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {

@@ -59,6 +59,12 @@ pub fn install() -> std::io::Result<PathBuf> {
     Ok(target)
 }
 
+/// Keeps the version shown in Settings → Apps current after an update.
+pub fn register_version() {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(k) = hkcu.open_subkey_with_flags(APP_KEY, KEY_SET_VALUE) { let _ = k.set_value("DisplayVersion", &env!("CARGO_PKG_VERSION")); }
+}
+
 pub fn set_start_with_windows(on: bool) {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     if let Ok((k, _)) = hkcu.create_subkey(RUN_KEY) {

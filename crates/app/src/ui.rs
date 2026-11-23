@@ -1,6 +1,6 @@
 //! The dock across the top of the screen and its control panel.
 use crate::glyph::{self, Glyph};
-use crate::{dock, download, install, net, store::Store, sys, worker};
+use crate::{dock, download, install, net, store::Store, sys, update, worker};
 use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
@@ -26,7 +26,7 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Quick }
+enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Quick, Update }
 
 /// The pages of the quick settings popup.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -35,6 +35,9 @@ enum QuickView { Main, Night, Access, Project }
 /// What a quick settings tile does when clicked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum QAct { Wifi, WifiList, Bluetooth, BluetoothDevices, Airplane, Night, NightPage, Hotspot, HotspotSettings, Access, Project, Cast, Captions, Nearby, Battery, Snip }
+
+/// How often to look for a new version (the first look is 20 s after start).
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// Width of a quick settings tile, and the gap between tiles.
 const TILE_W: f32 = 108.0;
@@ -99,6 +102,14 @@ pub struct Bar {
     from_quick: bool,
     quick_note: Option<String>,
     sticky: bool,
+    /// Updates: what the update thread found, when it last looked, the version whose popup was
+    /// already shown, and whether "install now" was asked for.
+    upd: update::Shared,
+    upd_at: Instant,
+    upd_seen: Option<ronin_core::update::Version>,
+    upd_install: bool,
+    /// For background work that has to wake the bar.
+    ctx: egui::Context,
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -122,7 +133,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 490.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 560.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 490.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 560.0), Popup::Update => (390.0, 370.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -169,7 +180,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -382,6 +393,7 @@ impl Bar {
                 }
             }
         }
+        self.updates(full);
         // The theme's own wallpaper as soon as it is drawn, on first start.
         if self.settings.wallpaper.is_empty() {
             let id = art::original_for(&self.settings.theme);
@@ -545,6 +557,12 @@ impl Bar {
                 if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, pw.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
+                // Shown only while a new version is waiting.
+                let newer = self.upd.lock().ok().and_then(|u| u.latest.as_ref().map(|r| r.version));
+                if let Some(v) = newer {
+                    let r = self.chip(ui, None, self.popup == Some(Popup::Update), |p, g| glyph::draw(p, g, Glyph::Update, accent));
+                    if r.on_hover_text(format!("Ronin Bar {v} is available")).clicked() { self.toggle_popup(Popup::Update, self.screen_w - 210.0); }
+                }
                 if self.chip(ui, None, la, |p, g| glyph::draw(p, g, Glyph::Apps, fg)).clicked() { self.open(Tab::Apps); }
                 if self.chip(ui, None, lt, |p, g| glyph::draw(p, g, Glyph::Theme, fg)).clicked() { self.open(Tab::Themes); }
                 let wall = self.chip(ui, None, lw, |p, g| glyph::draw(p, g, Glyph::Wallpaper, fg));
@@ -1276,6 +1294,14 @@ impl Bar {
                     install::set_start_with_windows(start);
                     self.save();
                 }
+                ui.add_space(12.0);
+                ui.label(RichText::new("UPDATES").color(c(t.accent)).size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label(format!("Ronin Bar {}", env!("CARGO_PKG_VERSION")));
+                    if ui.button("Check for updates").clicked() { self.upd_at = Instant::now(); update::check(self.upd.clone(), self.ctx.clone()); }
+                });
+                self.update_status(ui);
+                self.update_switches(ui);
                 ui.add_space(10.0);
                 ui.label(RichText::new(format!("Installed in {}", install::install_dir().display())).color(c(t.muted)).size(12.0));
                 ui.add_space(12.0);
@@ -1504,7 +1530,7 @@ impl Bar {
             };
             egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Quick => self.pop_quick(ui) }
+                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Quick => self.pop_quick(ui), Popup::Update => self.pop_update(ui) }
             });
             // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
             ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
@@ -1512,6 +1538,96 @@ impl Bar {
         });
         if fresh { ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus); }
         if close && self.popup.is_some() { self.close_popup(); }
+    }
+
+    /// Looks for new versions now and then; shows the popup once per new version, downloads it,
+    /// and installs it when asked to (or by itself, if that is switched on).
+    fn updates(&mut self, fullscreen: bool) {
+        if self.upd_at.elapsed() >= UPDATE_EVERY {
+            self.upd_at = Instant::now();
+            update::check(self.upd.clone(), self.ctx.clone());
+        }
+        let (latest, ready) = match self.upd.lock() { Ok(u) => (u.latest.as_ref().map(|r| r.version), u.ready.clone()), Err(_) => return };
+        let Some(v) = latest else { return };
+        if self.upd_seen != Some(v) {
+            self.upd_seen = Some(v);
+            if self.settings.auto_update { self.upd_install = true; update::fetch(self.upd.clone(), self.ctx.clone()); }
+            else if self.settings.update_popup && self.popup.is_none() && !self.panel && !fullscreen { self.toggle_popup(Popup::Update, self.screen_w - 210.0); }
+        }
+        if let Some(path) = ready {
+            if self.upd_install && !fullscreen {
+                self.upd_install = false;
+                match update::apply(&path) {
+                    Ok(()) => self.quit(),
+                    Err(e) => if let Ok(mut u) = self.upd.lock() { u.error = Some(e); u.ready = None; },
+                }
+            }
+        }
+    }
+
+    fn install_update(&mut self) {
+        self.upd_install = true;
+        update::fetch(self.upd.clone(), self.ctx.clone());
+    }
+
+    /// The update switches, in the update popup and in Settings.
+    fn update_switches(&mut self, ui: &mut egui::Ui) {
+        let mut pop = self.settings.update_popup;
+        if ui.checkbox(&mut pop, "Tell me when a new version is out").changed() { self.settings.update_popup = pop; self.save(); }
+        let mut auto = self.settings.auto_update;
+        if ui.checkbox(&mut auto, "Install new versions by themselves").changed() { self.settings.auto_update = auto; self.save(); }
+    }
+
+    /// Where an update stands, with the button to install it.
+    fn update_status(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let u = self.upd.lock().map(|u| u.clone()).unwrap_or_default();
+        if let Some((got, total)) = u.downloading {
+            let frac = if total > 0 { got as f32 / total as f32 } else { 0.0 };
+            ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).text(format!("Downloading… {:.1} MB", got as f32 / 1_048_576.0)));
+        } else if u.ready.is_some() {
+            ui.label(RichText::new("Installing…").color(c(t.accent)));
+        } else if let Some(r) = &u.latest {
+            if ui.button(RichText::new(format!("Install Ronin Bar {}", r.version)).strong()).clicked() { self.install_update(); }
+        } else if u.checking {
+            ui.label(RichText::new("Looking for a new version…").color(c(t.muted)));
+        } else if u.up_to_date {
+            ui.label(RichText::new("You have the newest version.").color(c(t.muted)));
+        }
+        if let Some(e) = &u.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+    }
+
+    fn pop_update(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let rel = self.upd.lock().ok().and_then(|u| u.latest.clone());
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
+            ui.label(RichText::new("New version available").strong().size(15.0));
+        });
+        ui.add_space(8.0);
+        let Some(rel) = rel else {
+            ui.label(RichText::new(format!("You have Ronin Bar {}, the newest version.", env!("CARGO_PKG_VERSION"))).color(c(t.muted)));
+            return
+        };
+        ui.label(RichText::new(format!("Ronin Bar {} is out. You have {}.", rel.version, env!("CARGO_PKG_VERSION"))).size(14.0));
+        ui.add_space(4.0);
+        ui.label(RichText::new("Installing replaces this version and removes it; your settings, pins and wallpapers stay. The bar restarts in a second.").color(c(t.muted)).size(12.0));
+        // Release notes, without the download instructions every release repeats.
+        let notes: Vec<&str> = rel.notes.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Download") && !l.starts_with("Uninstall") && !l.starts_with("SHA-256") && !l.starts_with("Updated build")).collect();
+        if !notes.is_empty() {
+            ui.add_space(6.0);
+            egui::ScrollArea::vertical().max_height(70.0).show(ui, |ui| { for l in notes { ui.label(RichText::new(l).size(12.0)); } });
+        }
+        ui.add_space(8.0);
+        self.update_status(ui);
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui.button("Later").clicked() { self.close_popup(); }
+            if ui.add(egui::Button::new(RichText::new("What's new").color(c(t.muted))).frame(false)).clicked() { sys::open_releases_page(); }
+        });
+        ui.add_space(6.0);
+        self.update_switches(ui);
     }
 
     /// Gives back the top strip and the taskbar.
