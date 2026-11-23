@@ -241,7 +241,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 | **0.5.0** | In-app updates with a "New version available" popup; a new README |
 | **0.4.0** | Ronin's own popups instead of Windows' flyouts: launcher, calendar, sound, battery with brightness, Wi-Fi, power, quick settings; real icons for Store apps; faster popups |
 | **0.3.0** | Wallpaper previews fixed; 1,363 more wallpapers in 15 categories; 4 new themes (9 in all) |
-| **0.2.x** | The bar moves to the top and replaces the taskbar, with windows below it like a Linux desktop; the Ronin logo; every setting on the bar; Quit and Uninstall fixed |
+| **0.2.0** | The bar moves to the top and replaces the taskbar, with windows below it like a Linux desktop; the Ronin logo; every setting on the bar; Quit and Uninstall fixed |
 | **0.1.0** | First release: the dock, wallpapers and themes |
 
 Every release, with its download and SHA-256, is on the [Releases](https://github.com/AEX0TIC/Ronin-bar/releases) page.
