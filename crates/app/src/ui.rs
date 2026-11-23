@@ -745,6 +745,7 @@ impl Bar {
         let apps = self.all_apps.lock().ok().and_then(|l| l.clone());
         let mut launch: Option<String> = None;
         let mut pin: Option<String> = None;
+        let mut unpin: Option<String> = None;
         if self.search.trim().is_empty() && !self.settings.pinned.is_empty() {
             ui.label(RichText::new("PINNED").color(c(t.accent)).size(11.0));
             let pinned = self.settings.pinned.clone();
@@ -760,7 +761,18 @@ impl Bar {
                     }
                     let short: String = name.chars().take(10).collect();
                     ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, short, FontId::proportional(10.5), c(t.fg));
-                    if r.on_hover_text(&name).clicked() { launch = Some(p.clone()); }
+                    // A small × in the corner unpins (so does a right-click).
+                    let x_rect = Rect::from_center_size(rect.right_top() + vec2(-9.0, 9.0), Vec2::splat(16.0));
+                    let x = ui.interact(x_rect, ui.scope_id().with("unpin").with(p.as_str()), Sense::click());
+                    if r.hovered() || x.hovered() {
+                        ui.painter().circle_filled(x_rect.center(), 8.0, if x.hovered() { c(t.accent) } else { c(t.surface) });
+                        let k = x_rect.shrink(4.5);
+                        let st = Stroke::new(1.4, c(t.fg));
+                        ui.painter().line_segment([k.left_top(), k.right_bottom()], st);
+                        ui.painter().line_segment([k.right_top(), k.left_bottom()], st);
+                    }
+                    if x.on_hover_text("Unpin").clicked() || r.secondary_clicked() { unpin = Some(p.clone()); }
+                    else if r.on_hover_text(format!("{name}\nright-click to unpin")).clicked() { launch = Some(p.clone()); }
                 }
             });
             ui.add_space(6.0);
@@ -780,17 +792,25 @@ impl Bar {
                         if let Some(tex) = self.icon(&ctx, id) { egui::Image::new((tex.id(), Vec2::splat(22.0))).paint_at(ui, icon); }
                         ui.painter().text(egui::pos2(rect.left() + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, name, FontId::proportional(13.5), c(t.fg));
                         let pinned = self.settings.pinned.iter().any(|p| p == id);
-                        if r.hovered() && !pinned {
-                            ui.painter().text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, "right-click to pin", FontId::proportional(10.5), c(t.muted));
+                        // Pin / Unpin button at the end of the row (always shown for pinned apps).
+                        let pill = Rect::from_min_max(egui::pos2(rect.right() - 66.0, rect.top() + 4.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0));
+                        let b = ui.interact(pill, ui.scope_id().with("pin").with(id.as_str()), Sense::click());
+                        if r.hovered() || b.hovered() || pinned {
+                            let fill = if b.hovered() { c(t.accent) } else if pinned { c(t.accent).gamma_multiply(0.25) } else { c(t.surface).gamma_multiply(1.6) };
+                            ui.painter().rect_filled(pill, 11.0, fill);
+                            let ink = if b.hovered() { c(t.bg) } else { c(t.fg) };
+                            ui.painter().text(pill.center(), egui::Align2::CENTER_CENTER, if pinned { "Unpin" } else { "Pin" }, FontId::proportional(12.0), ink);
                         }
-                        if r.clicked() { launch = Some(id.clone()); }
-                        if r.secondary_clicked() && !pinned { pin = Some(id.clone()); }
+                        if b.clicked() { if pinned { unpin = Some(id.clone()) } else { pin = Some(id.clone()) } }
+                        else if r.clicked() { launch = Some(id.clone()); }
+                        else if r.secondary_clicked() { if pinned { unpin = Some(id.clone()) } else { pin = Some(id.clone()) } }
                     }
                 });
                 if found.is_empty() { ui.label(RichText::new("No app matches.").color(c(t.muted))); }
             }
         }
         if let Some(p) = pin { self.pin(&p); }
+        if let Some(p) = unpin { if let Some(i) = self.settings.pinned.iter().position(|q| *q == p) { self.unpin(i); } }
         if let Some(id) = launch { dock::launch(&id); self.close_popup(); return }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
