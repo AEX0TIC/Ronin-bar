@@ -231,6 +231,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.7.2** | The bar follows the screen's real scale: proper height and width after a scale or monitor change, and the panel and popups open in the right place |
 | **0.7.1** | The launcher lists only software: programs and game launchers from your desktop are added (not files, videos or documents), apps like DaVinci Resolve are found through their install folder, Command Prompt, PowerShell and Windows' admin tools are gone, and so is the power button |
 | **0.7.0** | A cleaner, easier launcher: only real apps (helpers, links and manuals left out), programs without a Start-menu entry added, Most used, smarter search with initials, arrow keys, and a right-click menu to pin, hide or show in folder |
 | **0.6.2** | Bluetooth without lag: Windows reports each device change instead of Ronin asking again and again; search stops by itself and never shows while Bluetooth is off; Wi-Fi and Bluetooth switches react instantly; the launcher is just apps and power |

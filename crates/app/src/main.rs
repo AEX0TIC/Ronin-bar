@@ -24,6 +24,7 @@ fn main() { eprintln!("Ronin Bar runs on Windows 10 and 11."); }
 #[cfg(windows)]
 fn main() {
     use std::sync::Arc;
+    sys::dpi_aware();
     let store = Arc::new(store::Store { data: install::data_dir() });
 
     if std::env::args().any(|a| a == "--uninstall") {

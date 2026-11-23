@@ -267,13 +267,38 @@ pub fn find_window(title: &str) -> Option<HWND> {
 }
 
 /// The primary monitor's size in physical pixels, and its DPI scale.
+/// Lets Ronin see the screen in real pixels and each monitor's own scale. Called first thing, so
+/// the size read at start is the real one.
+pub fn dpi_aware() {
+    use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
+    unsafe { let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2); }
+}
+
+/// The main screen's size in pixels and its scale right now (Settings → Display → Scale).
+/// Windows' "system" scale is fixed at sign-in, so the monitor's own scale is asked instead.
 pub fn primary_screen() -> (i32, i32, f32) {
+    use windows::Win32::Graphics::Gdi::MonitorFromPoint;
+    use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
     unsafe {
         let w = GetSystemMetrics(SM_CXSCREEN);
         let h = GetSystemMetrics(SM_CYSCREEN);
-        let dpi = windows::Win32::UI::HiDpi::GetDpiForSystem();
+        let mon = MonitorFromPoint(windows::Win32::Foundation::POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let (mut dx, mut dy) = (0u32, 0u32);
+        let dpi = if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx >= 48 { dx } else { windows::Win32::UI::HiDpi::GetDpiForSystem() };
         (w, h, dpi as f32 / 96.0)
     }
+}
+
+/// The bar's strip got taller or shorter (the screen's scale changed): reserve the new strip.
+pub fn appbar_resize(hwnd: HWND, height_px: i32) {
+    unsafe {
+        let mut d = appbar_data(hwnd);
+        let (w, _, _) = primary_screen();
+        d.rc = RECT { left: 0, top: 0, right: w, bottom: height_px };
+        SHAppBarMessage(ABM_SETPOS, &mut d);
+        let _ = SetWindowPos(hwnd, None, 0, 0, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
+    }
+    keep_top_free(height_px);
 }
 
 fn appbar_data(hwnd: HWND) -> APPBARDATA {
