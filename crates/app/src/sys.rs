@@ -14,7 +14,6 @@ use windows::Win32::System::Power::{GetSystemPowerStatus, SetSuspendState, SYSTE
 use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_LOGOFF, EWX_POWEROFF, EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetSystemTimes, OpenProcessToken};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN};
 use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_TOP, ABM_GETSTATE, ABM_NEW, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE, ABS_ALWAYSONTOP, ABS_AUTOHIDE, APPBARDATA};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -412,19 +411,7 @@ pub fn show_taskbar(state: Option<u32>) {
     }
 }
 
-// ───── Windows shortcuts ─────
-/// Presses Win (+ `key`), e.g. Win for Start, Win+A for quick settings, Win+N for notifications.
-pub fn press_win(key: Option<u16>) {
-    let k = |vk: VIRTUAL_KEY, up: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, dwFlags: if up { KEYEVENTF_KEYUP } else { Default::default() }, ..Default::default() } },
-    };
-    let mut seq = vec![k(VK_LWIN, false)];
-    if let Some(c) = key { seq.push(k(VIRTUAL_KEY(c), false)); seq.push(k(VIRTUAL_KEY(c), true)); }
-    seq.push(k(VK_LWIN, true));
-    unsafe { SendInput(&seq, std::mem::size_of::<INPUT>() as i32); }
-}
-
+// ───── Windows pages ─────
 /// Opens one of a fixed set of Windows settings pages (the "more settings" links in Ronin's popups).
 pub fn open_settings(page: &str) {
     const PAGES: [&str; 7] = ["sound", "network-wifi", "network-status", "bluetooth", "display", "batterysaver", "powersleep"];

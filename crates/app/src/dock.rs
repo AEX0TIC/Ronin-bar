@@ -53,7 +53,7 @@ pub fn start_menu_apps() -> Vec<(String, String)> {
 
 /// Opens a pinned shortcut or program the way Explorer would (no shell, no arguments).
 pub fn launch(path: &str) -> bool {
-    if !dock::pinnable(path) || !Path::new(path).is_file() { return false }
+    if !dock::pinnable(path) || (!dock::is_app_id(path) && !Path::new(path).is_file()) { return false }
     let r = unsafe { ShellExecuteW(None, w!("open"), &HSTRING::from(path), None, None, SW_SHOWNORMAL) };
     r.0 as isize > 32
 }
@@ -124,8 +124,72 @@ pub fn minimize(hwnd: isize) { unsafe { let _ = ShowWindow(h(hwnd), SW_MINIMIZE)
 /// Asks the window to close, like its X button (the app may still ask to save).
 pub fn close(hwnd: isize) { unsafe { let _ = PostMessageW(Some(h(hwnd)), WM_CLOSE, WPARAM(0), LPARAM(0)); } }
 
-/// The icon Explorer shows for a file, as RGBA pixels.
+/// Every installed app, as Windows' Applications folder lists them (Store apps too), with its
+/// name and launch id (`shell:AppsFolder\\…`), sorted by name. Call on a thread with COM.
+pub fn all_apps() -> Vec<(String, String)> {
+    use windows::Win32::UI::Shell::{IEnumShellItems, IShellItem, SHGetKnownFolderItem, BHID_EnumItems, FOLDERID_AppsFolder, KF_FLAG_DEFAULT, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING};
+    let mut out: Vec<(String, String)> = Vec::new();
+    unsafe {
+        let Ok(folder) = SHGetKnownFolderItem::<IShellItem>(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None) else { return out };
+        let Ok(items) = folder.BindToHandler::<_, IEnumShellItems>(None, &BHID_EnumItems) else { return out };
+        loop {
+            let mut one = [None];
+            let mut n = 0u32;
+            if items.Next(&mut one, Some(&mut n)).is_err() || n == 0 { break }
+            let Some(item) = one[0].take() else { break };
+            let text = |k| item.GetDisplayName(k).ok().map(|p| {
+                let s = p.to_string().unwrap_or_default();
+                windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+                s
+            });
+            let (Some(name), Some(id)) = (text(SIGDN_NORMALDISPLAY), text(SIGDN_PARENTRELATIVEPARSING)) else { continue };
+            let target = format!("{}{id}", dock::APP_PREFIX);
+            if name.trim().is_empty() || dock::is_clutter(&name) || !dock::is_app_id(&target) { continue }
+            if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) { out.push((name, target)); }
+            if out.len() > 2000 { break }
+        }
+    }
+    out.sort_by_key(|(n, _)| n.to_lowercase());
+    out
+}
+
+/// An installed app's icon (from Windows' Applications folder), as premultiplied RGBA.
+fn app_icon(id: &str) -> Option<(usize, usize, Vec<u8>)> {
+    use windows::Win32::UI::Shell::{IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_ICONONLY};
+    unsafe {
+        let f: IShellItemImageFactory = SHCreateItemFromParsingName(&HSTRING::from(id), None).ok()?;
+        let bmp = f.GetImage(windows::Win32::Foundation::SIZE { cx: 48, cy: 48 }, SIIGBF_ICONONLY).ok()?;
+        let px = bitmap_pixels(bmp);
+        let _ = DeleteObject(HGDIOBJ(bmp.0));
+        px
+    }
+}
+
+/// The pixels of a 32-bit bitmap, top row first, as RGBA.
+unsafe fn bitmap_pixels(bmp: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<(usize, usize, Vec<u8>)> {
+    let mut bm = BITMAP::default();
+    if unsafe { GetObjectW(HGDIOBJ(bmp.0), std::mem::size_of::<BITMAP>() as i32, Some(&mut bm as *mut BITMAP as *mut c_void)) } == 0 { return None }
+    let (wd, ht) = (bm.bmWidth.clamp(1, 256) as usize, bm.bmHeight.clamp(1, 256) as usize);
+    let mut bmi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32, biWidth: wd as i32, biHeight: -(ht as i32),
+            biPlanes: 1, biBitCount: 32, biCompression: BI_RGB.0, ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut px = vec![0u8; wd * ht * 4];
+    let dc = unsafe { CreateCompatibleDC(None) };
+    let lines = unsafe { GetDIBits(dc, bmp, 0, ht as u32, Some(px.as_mut_ptr() as *mut c_void), &mut bmi, DIB_RGB_COLORS) };
+    unsafe { let _ = DeleteDC(dc); }
+    if lines == 0 { return None }
+    let has_alpha = px.chunks_exact(4).any(|p| p[3] != 0);
+    for p in px.chunks_exact_mut(4) { p.swap(0, 2); if !has_alpha { p[3] = 255; } }
+    Some((wd, ht, px))
+}
+
+/// The icon Explorer shows for a file or installed app, as RGBA pixels.
 pub fn icon_rgba(path: &str) -> Option<(usize, usize, Vec<u8>)> {
+    if dock::is_app_id(path) { return app_icon(path) }
     unsafe {
         let mut info = SHFILEINFOW::default();
         let ok = SHGetFileInfoW(&HSTRING::from(path), FILE_FLAGS_AND_ATTRIBUTES(0), Some(&mut info),
