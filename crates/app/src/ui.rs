@@ -380,10 +380,21 @@ impl Bar {
         ui.painter().line_segment([pos2(r.center().x, r.top() + 11.0), pos2(r.center().x, r.bottom() - 11.0)], Stroke::new(1.0, c(self.theme().muted).gamma_multiply(0.45)));
     }
 
+    /// An open window's icon: its program's, else its installed app's (Store apps), else the icon
+    /// the window draws in its own title bar.
+    fn win_icon(&mut self, ctx: &egui::Context, w: &dock::Win) -> Option<egui::TextureHandle> {
+        if let Some(t) = w.own_exe().and_then(|e| self.icon(ctx, e)) { return Some(t) }
+        if let Some(t) = w.app.as_deref().and_then(|a| self.icon(ctx, a)) { return Some(t) }
+        let key = format!("window:{}", w.hwnd);
+        if let Some(t) = self.icons.get(&key) { return t.clone() }
+        let tex = dock::window_icon(w.hwnd).map(|(iw, ih, px)| ctx.load_texture(&key, egui::ColorImage::from_rgba_unmultiplied([iw, ih], &px), egui::TextureOptions::LINEAR));
+        self.icons.insert(key, tex.clone());
+        tex
+    }
+
     /// One dock slot: the app's icon (or its first letter) and a marker when it is in front.
-    fn slot(&mut self, ui: &mut egui::Ui, path: Option<&str>, name: &str, front: bool, dim: bool) -> egui::Response {
+    fn slot(&mut self, ui: &mut egui::Ui, tex: Option<egui::TextureHandle>, name: &str, front: bool, dim: bool) -> egui::Response {
         let t = self.theme();
-        let tex = path.and_then(|p| self.icon(ui.ctx(), p));
         let (rect, r) = ui.allocate_exact_size(Vec2::new(SLOT, BAR_HEIGHT), Sense::click());
         if r.hovered() || front { ui.painter().rect_filled(rect.shrink2(Vec2::new(2.0, 4.0)), 8.0, c(t.accent).gamma_multiply(if front { 0.18 } else { 0.28 })); }
         let icon = Rect::from_center_size(rect.center() - vec2(0.0, 1.0), Vec2::splat(ICON));
@@ -409,7 +420,8 @@ impl Bar {
         let pinned = self.settings.pinned.clone();
         for p in pinned.iter().take(slots) {
             let name = self.app_name(p);
-            let r = self.slot(ui, Some(p), &name, false, false);
+            let tex = self.icon(ui.ctx(), p);
+            let r = self.slot(ui, tex, &name, false, false);
             if r.clicked() && !dock::launch(p) { self.open(Tab::Apps); }
             if r.secondary_clicked() { self.open(Tab::Apps); }
         }
@@ -426,13 +438,14 @@ impl Bar {
         for win in wins.iter().take(shown) {
             let min = dock::is_minimized(win.hwnd);
             let front = win.hwnd == self.active && !min;
-            let r = self.slot(ui, win.exe.as_deref(), &win.title, front, min);
+            let tex = self.win_icon(&ui.ctx().clone(), win);
+            let r = self.slot(ui, tex, &win.title, front, min);
             if r.clicked() {
                 if front { dock::minimize(win.hwnd); self.active = 0; } else { dock::focus(win.hwnd); self.active = win.hwnd; }
             }
             if r.middle_clicked() { dock::close(win.hwnd); }
             if r.secondary_clicked() {
-                if let Some(exe) = &win.exe { if !self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(exe)) { let e = exe.clone(); self.pin(&e); } }
+                if let Some(target) = win.pin_target() { if !self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(&target)) { self.pin(&target); } }
             }
         }
         if wins.len() > shown {
