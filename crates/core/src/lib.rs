@@ -9,6 +9,7 @@ pub mod github;
 pub mod settings;
 pub mod theme;
 pub mod wallhaven;
+pub mod wifi;
 
 /// CPU use in percent between two samples of Windows' (idle, kernel, user) time counters.
 /// Kernel time includes idle time.
