@@ -343,6 +343,14 @@ pub fn press_win(key: Option<u16>) {
     unsafe { SendInput(&seq, std::mem::size_of::<INPUT>() as i32); }
 }
 
+/// Opens one of a fixed set of Windows settings pages (the "more settings" links in Ronin's popups).
+pub fn open_settings(page: &str) {
+    const PAGES: [&str; 7] = ["sound", "network-wifi", "network-status", "bluetooth", "display", "batterysaver", "powersleep"];
+    if !PAGES.contains(&page) { return }
+    let uri = HSTRING::from(format!("ms-settings:{page}"));
+    unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &uri, None, None, SW_SHOWNORMAL); }
+}
+
 /// Opens Task Manager.
 pub fn task_manager() {
     unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), w!("taskmgr.exe"), None, None, SW_SHOWNORMAL); }

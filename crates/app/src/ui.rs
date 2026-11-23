@@ -26,7 +26,7 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Calendar }
+enum Popup { Calendar, Sound }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm { Sleep, Restart, ShutDown, Uninstall }
@@ -471,9 +471,9 @@ impl Bar {
                 self.divider(ui);
                 if let Some((v, m)) = s.volume {
                     let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
-                    let r = self.chip(ui, Some(text), lv, |p, g| glyph::volume(p, g, v, m, fg));
-                    if r.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
-                    if r.secondary_clicked() { self.open(Tab::Sound); }
+                    let r = self.chip(ui, Some(text), lv || self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
+                    if r.clicked() { self.toggle_popup(Popup::Sound, r.rect.center().x); }
+                    if r.secondary_clicked() || r.middle_clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
                     if r.hovered() {
                         // One wheel notch = 5 %.
                         let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
@@ -537,6 +537,37 @@ impl Bar {
                 }
             });
         }
+    }
+
+    /// A "more in Windows settings" link at the bottom of a popup.
+    fn settings_link(&self, ui: &mut egui::Ui, label: &str, page: &str) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if ui.add(egui::Button::new(RichText::new(label).size(12.0).color(c(self.theme().muted))).frame(false)).clicked() { sys::open_settings(page); }
+        });
+    }
+
+    fn pop_sound(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        let Some((v, m)) = s.volume else { ui.label("No sound device found."); return };
+        ui.horizontal(|ui| {
+            let (r, mute) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+            if mute.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
+            glyph::volume(ui.painter(), r.shrink(3.0), v, m, c(if m { t.muted } else { t.fg }));
+            if mute.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
+            ui.label(RichText::new("Sound").strong().size(15.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(if m { "muted".to_string() } else { format!("{:.0}%", v * 100.0) }).size(15.0));
+            });
+        });
+        ui.add_space(8.0);
+        let mut pct = (v * 100.0).round();
+        ui.spacing_mut().slider_width = ui.available_width();
+        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false)).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
+        ui.add_space(6.0);
+        let mut mute = m;
+        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
+        self.settings_link(ui, "Sound settings", "sound");
     }
 
     // ───── the control panel ─────
@@ -866,7 +897,7 @@ impl eframe::App for Bar {
             if close { self.panel = false; }
         }
         if let Some(p) = self.popup {
-            let (w, h) = match p { Popup::Calendar => (330.0, 392.0) };
+            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0) };
             let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
             let builder = egui::ViewportBuilder::default()
                 .with_title(POPUP_TITLE)
@@ -878,7 +909,7 @@ impl eframe::App for Bar {
                 let t = self.theme();
                 egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    match p { Popup::Calendar => self.pop_calendar(ui) }
+                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui) }
                 });
                 // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
