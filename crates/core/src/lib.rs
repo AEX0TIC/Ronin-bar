@@ -6,6 +6,7 @@ pub mod art;
 pub mod calendar;
 pub mod dock;
 pub mod github;
+pub mod night;
 pub mod settings;
 pub mod theme;
 pub mod wallhaven;
