@@ -15,6 +15,7 @@
 #[cfg(windows)] mod sys;
 #[cfg(windows)] mod ui;
 #[cfg(windows)] mod update;
+#[cfg(windows)] mod winrt;
 #[cfg(windows)] mod worker;
 
 #[cfg(not(windows))]

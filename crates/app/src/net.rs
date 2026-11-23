@@ -9,6 +9,8 @@ use windows::core::{GUID, HSTRING, PCWSTR};
 use windows::Devices::Radios::{Radio, RadioKind, RadioState};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::NetworkManagement::WiFi::*;
+use crate::winrt::{spawn, wait};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct Network {
@@ -156,7 +158,7 @@ impl Wlan {
 
 /// Wi-Fi and Bluetooth radios: on, off, or None when there is none (or access was refused).
 fn radios() -> (Option<bool>, Option<bool>) {
-    let Ok(list) = Radio::GetRadiosAsync().and_then(|a| a.join()) else { return (None, None) };
+    let Ok(list) = wait(Radio::GetRadiosAsync(), Duration::from_secs(4)) else { return (None, None) };
     let (mut wifi, mut bt) = (None, None);
     for r in list {
         let on = r.State().map(|s| s == RadioState::On).ok();
@@ -170,13 +172,13 @@ fn radios() -> (Option<bool>, Option<bool>) {
 }
 
 fn set_radio(bluetooth: bool, on: bool) -> Result<(), String> {
-    let _ = Radio::RequestAccessAsync().and_then(|a| a.join());
-    let list = Radio::GetRadiosAsync().and_then(|a| a.join()).map_err(|e| e.message())?;
+    let _ = wait(Radio::RequestAccessAsync(), Duration::from_secs(4));
+    let list = wait(Radio::GetRadiosAsync(), Duration::from_secs(4))?;
     let kind = if bluetooth { RadioKind::Bluetooth } else { RadioKind::WiFi };
     for r in list {
         if r.Kind().ok() == Some(kind) {
             let state = if on { RadioState::On } else { RadioState::Off };
-            r.SetStateAsync(state).and_then(|a| a.join()).map_err(|e| e.message())?;
+            wait(r.SetStateAsync(state), Duration::from_secs(8))?;
         }
     }
     Ok(())
@@ -201,7 +203,7 @@ fn set_hotspot(on: bool) -> Result<(), String> {
     let profile = NetworkInformation::GetInternetConnectionProfile().map_err(|_| "No internet connection to share".to_string())?;
     let m = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile).map_err(|e| e.message())?;
     let op = if on { m.StartTetheringAsync() } else { m.StopTetheringAsync() };
-    let r = op.and_then(|a| a.join()).map_err(|e| e.message())?;
+    let r = wait(op, Duration::from_secs(25))?;
     match r.Status() {
         Ok(TetheringOperationStatus::Success) => Ok(()),
         _ => Err(r.AdditionalErrorMessage().map(|m| m.to_string()).ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "Windows refused".to_string())),
@@ -217,7 +219,39 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
         let nets = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
         set(&|s| s.networks = nets.clone());
     };
-    let radios_now = || { let (w, b) = radios(); let hs = hotspot(); set(&|s| { s.wifi_on = w; s.bluetooth_on = b; s.hotspot_on = hs; }); };
+    // Radio and hotspot state are read on a thread of their own (one at a time): those Windows
+    // calls can be slow, and the Wi-Fi list must never wait for them.
+    let reading = Arc::new(AtomicBool::new(false));
+    let radios_now = || {
+        if reading.swap(true, Ordering::SeqCst) { return }
+        let (st, wk, busy) = (state.clone(), wake.clone(), reading.clone());
+        spawn(move || {
+            let (w, b) = radios();
+            if let Ok(mut s) = st.lock() { s.wifi_on = w; s.bluetooth_on = b; }
+            wk.request_repaint();
+            let hs = hotspot();
+            if let Ok(mut s) = st.lock() { s.hotspot_on = hs; }
+            wk.request_repaint();
+            busy.store(false, Ordering::SeqCst);
+        });
+    };
+    // Switching radios or the hotspot runs beside this thread too; the popup already shows the
+    // new state, and the real one is read back when Windows has finished.
+    let switch = |what: &'static str, job: Box<dyn FnOnce() -> Result<(), String> + Send>| {
+        let (st, wk, busy) = (state.clone(), wake.clone(), reading.clone());
+        spawn(move || {
+            let r = job();
+            if let Ok(mut s) = st.lock() { s.error = r.err().map(|e| format!("{what}: {e}")); }
+            // Read back the real state (unless a read is already running).
+            if !busy.swap(true, Ordering::SeqCst) {
+                let (w, b) = radios();
+                let hs = hotspot();
+                if let Ok(mut s) = st.lock() { s.wifi_on = w; s.bluetooth_on = b; s.hotspot_on = hs; }
+                busy.store(false, Ordering::SeqCst);
+            }
+            wk.request_repaint();
+        });
+    };
     // Which radios were on before airplane mode, to turn the same ones back on.
     let mut before_airplane = (true, false);
     list(&wlan);
@@ -265,28 +299,22 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
                 later.extend(soon(&[600, 1500]));
             }
             Some(NetCmd::Radio { bluetooth, on }) => {
-                let r = set_radio(bluetooth, on);
-                set(&|s| s.error = r.clone().err().map(|e| format!("Could not switch {}: {e}", if bluetooth { "Bluetooth" } else { "Wi-Fi" })));
-                radios_now();
-                later.extend(soon(&[800, 2500]));
+                switch(if bluetooth { "Could not switch Bluetooth" } else { "Could not switch Wi-Fi" }, Box::new(move || set_radio(bluetooth, on)));
+                if !bluetooth { later.extend(soon(&[1500, 3500])); }
             }
             Some(NetCmd::Airplane(on)) => {
                 let (w, b) = state.lock().map(|s| (s.wifi_on, s.bluetooth_on)).unwrap_or((None, None));
-                let r = if on {
-                    before_airplane = (w == Some(true), b == Some(true));
-                    set_radio(false, false).and(if b.is_some() { set_radio(true, false) } else { Ok(()) })
+                if on { before_airplane = (w == Some(true), b == Some(true)); }
+                let (w0, b0, has_bt) = (before_airplane.0, before_airplane.1, b.is_some());
+                switch("Could not switch airplane mode", Box::new(move || if on {
+                    set_radio(false, false).and(if has_bt { set_radio(true, false) } else { Ok(()) })
                 } else {
-                    let (w0, b0) = before_airplane;
                     set_radio(false, w0 || !b0).and(if b0 { set_radio(true, true) } else { Ok(()) })
-                };
-                set(&|s| s.error = r.clone().err().map(|e| format!("Could not switch airplane mode: {e}")));
-                radios_now();
-                later.extend(soon(&[800, 2500]));
+                }));
+                later.extend(soon(&[1500, 3500]));
             }
             Some(NetCmd::Hotspot(on)) => {
-                let r = set_hotspot(on);
-                set(&|s| s.error = r.clone().err().map(|e| format!("Mobile hotspot: {e}")));
-                radios_now();
+                switch("Mobile hotspot", Box::new(move || set_hotspot(on)));
             }
             None => {}
         }
