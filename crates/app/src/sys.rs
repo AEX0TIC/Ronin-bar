@@ -11,7 +11,7 @@ use windows::Win32::Networking::NetworkListManager::{INetworkListManager, Networ
 use windows::Win32::Security::{AdjustTokenPrivileges, LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY};
 use windows::Win32::System::Com::{CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SetSuspendState, SYSTEM_POWER_STATUS};
-use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_POWEROFF, EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER};
+use windows::Win32::System::Shutdown::{ExitWindowsEx, LockWorkStation, EWX_LOGOFF, EWX_POWEROFF, EWX_REBOOT, SHTDN_REASON_FLAG_PLANNED, SHTDN_REASON_MAJOR_OTHER};
 use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 use windows::Win32::System::Threading::{CreateMutexW, GetCurrentProcess, GetSystemTimes, OpenProcessToken};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LWIN};
@@ -350,6 +350,9 @@ pub fn open_settings(page: &str) {
     let uri = HSTRING::from(format!("ms-settings:{page}"));
     unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &uri, None, None, SW_SHOWNORMAL); }
 }
+
+/// Signs out of Windows (open apps are asked to close).
+pub fn sign_out() { unsafe { let _ = ExitWindowsEx(EWX_LOGOFF, SHTDN_REASON_MAJOR_OTHER | SHTDN_REASON_FLAG_PLANNED); } }
 
 /// Opens Task Manager.
 pub fn task_manager() {

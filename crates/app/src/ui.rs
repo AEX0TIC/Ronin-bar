@@ -26,10 +26,10 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Calendar, Sound }
+enum Popup { Calendar, Sound, Power }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Confirm { Sleep, Restart, ShutDown, Uninstall }
+enum Confirm { Sleep, SignOut, Restart, ShutDown, Uninstall }
 
 pub struct Bar {
     store: Arc<Store>,
@@ -460,7 +460,8 @@ impl Bar {
                 ui.add_space(6.0);
                 let lit = |tab: Tab| self.panel && self.tab == tab;
                 let (lp, ls, la, lt, lw, lv) = (lit(Tab::Power), lit(Tab::Settings), lit(Tab::Apps), lit(Tab::Themes), lit(Tab::Wallpapers), lit(Tab::Sound));
-                if self.chip(ui, None, lp, |p, g| glyph::draw(p, g, Glyph::Power, accent)).clicked() { self.open(Tab::Power); }
+                let pw = self.chip(ui, None, lp || self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
+                if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, pw.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
                 if self.chip(ui, None, la, |p, g| glyph::draw(p, g, Glyph::Apps, fg)).clicked() { self.open(Tab::Apps); }
@@ -568,6 +569,18 @@ impl Bar {
         let mut mute = m;
         if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
         self.settings_link(ui, "Sound settings", "sound");
+    }
+
+    fn pop_power(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Power").strong().size(15.0));
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        let big = |ui: &mut egui::Ui, label: &str| ui.add_sized([w, 32.0], egui::Button::new(RichText::new(label).size(14.0)));
+        if big(ui, "Lock").clicked() { let _ = self.tx.send(worker::Cmd::Lock); self.close_popup(); }
+        for (label, what) in [("Sleep", Confirm::Sleep), ("Sign out", Confirm::SignOut), ("Restart", Confirm::Restart), ("Shut down", Confirm::ShutDown)] {
+            if big(ui, label).clicked() { self.confirm = Some(what); }
+        }
+        self.confirm_row(ui);
     }
 
     // ───── the control panel ─────
@@ -692,6 +705,7 @@ impl Bar {
         let Some(what) = self.confirm else { return };
         let q = match what {
             Confirm::Sleep => "Put the PC to sleep now?",
+            Confirm::SignOut => "Sign out of Windows now?",
             Confirm::Restart => "Restart the PC now?",
             Confirm::ShutDown => "Shut down the PC now?",
             Confirm::Uninstall => "Remove Ronin Bar and its wallpapers, bring the taskbar back, and put your old wallpaper and colours back?",
@@ -703,6 +717,7 @@ impl Bar {
                 self.confirm = None;
                 match what {
                     Confirm::Sleep => { let _ = self.tx.send(worker::Cmd::Sleep); }
+                    Confirm::SignOut => { let _ = self.tx.send(worker::Cmd::SignOut); }
                     Confirm::Restart => { let _ = self.tx.send(worker::Cmd::Restart); }
                     Confirm::ShutDown => { let _ = self.tx.send(worker::Cmd::ShutDown); }
                     Confirm::Uninstall => {
@@ -897,7 +912,7 @@ impl eframe::App for Bar {
             if close { self.panel = false; }
         }
         if let Some(p) = self.popup {
-            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0) };
+            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0) };
             let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
             let builder = egui::ViewportBuilder::default()
                 .with_title(POPUP_TITLE)
@@ -909,7 +924,7 @@ impl eframe::App for Bar {
                 let t = self.theme();
                 egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui) }
+                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui) }
                 });
                 // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)

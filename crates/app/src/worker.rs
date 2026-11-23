@@ -16,7 +16,7 @@ pub struct Stats {
     pub fullscreen: bool,
 }
 
-pub enum Cmd { Volume(f32), Mute(bool), Lock, Sleep, Restart, ShutDown }
+pub enum Cmd { Volume(f32), Mute(bool), Lock, Sleep, SignOut, Restart, ShutDown }
 
 pub fn start() -> (Arc<Mutex<Stats>>, Sender<Cmd>) {
     let stats = Arc::new(Mutex::new(Stats::default()));
@@ -41,6 +41,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
                 Cmd::Mute(m) => if let Some(e) = &vol { sys::mute_set(e, m) },
                 Cmd::Lock => sys::lock(),
                 Cmd::Sleep => sys::sleep(),
+                Cmd::SignOut => sys::sign_out(),
                 Cmd::Restart => sys::restart(),
                 Cmd::ShutDown => sys::shut_down(),
             }
