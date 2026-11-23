@@ -91,6 +91,9 @@ pub struct Bar {
     /// App ids of open windows the list was already read again for (once each).
     apps_asked: std::collections::HashSet<String>,
     search: String,
+    /// The launcher's chosen row (↑ ↓) and whether hidden apps are shown.
+    launcher_sel: usize,
+    show_hidden: bool,
     /// The brightness and volume being dragged, until the slider is let go, and when brightness
     /// was last sent (the screen is asked at most a few times a second).
     bright_drag: Option<f32>,
@@ -183,7 +186,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -222,7 +225,7 @@ impl Bar {
         if p == Popup::Bluetooth { let _ = self.bt_tx.send(bt::BtCmd::CheckAudio); }
         if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
         if p == Popup::Quick { self.quick_view = QuickView::Main; self.quick_note = None; self.sticky = sys::sticky_keys(); }
-        if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
+        if p == Popup::Launcher { self.search.clear(); self.launcher_sel = 0; self.show_hidden = false; self.load_apps(); }
     }
 
     fn close_popup(&mut self) {
@@ -763,38 +766,33 @@ impl Bar {
         pins::display_name(pin)
     }
 
-    fn pop_launcher(&mut self, ui: &mut egui::Ui) {
+    /// Opens an app from the launcher and remembers it for "Most used".
+    fn launch_app(&mut self, id: &str) {
+        if dock::launch(id) {
+            ronin_core::launcher::count_launch(&mut self.settings.launch_counts, id);
+            self.save();
+        }
+        self.close_popup();
+    }
+
+    /// A row of big app icons (pinned or most used); returns what was clicked.
+    fn icon_row(&mut self, ui: &mut egui::Ui, apps: &[String], can_unpin: bool) -> (Option<String>, Option<String>) {
         let t = self.theme();
         let ctx = ui.ctx().clone();
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
-            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
-            ui.label(RichText::new("R O N I N").strong().size(15.0));
-        });
-        ui.add_space(6.0);
-        let field = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search apps").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
-        if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
-        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        ui.add_space(8.0);
-        let apps = self.all_apps.lock().ok().and_then(|l| l.clone());
-        let mut launch: Option<String> = None;
-        let mut pin: Option<String> = None;
-        let mut unpin: Option<String> = None;
-        if self.search.trim().is_empty() && !self.settings.pinned.is_empty() {
-            ui.label(RichText::new("PINNED").color(c(t.accent)).size(11.0));
-            let pinned = self.settings.pinned.clone();
-            ui.horizontal_wrapped(|ui| {
-                for p in pinned.iter().take(12) {
-                    let name = self.app_name(p);
-                    let (rect, r) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::click());
-                    if r.hovered() { ui.painter().rect_filled(rect, 10.0, c(t.surface)); }
-                    let icon = Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(30.0));
-                    match self.icon(&ctx, p) {
-                        Some(tex) => { egui::Image::new((tex.id(), Vec2::splat(30.0))).paint_at(ui, icon); }
-                        None => { ui.painter().rect_filled(icon, 7.0, c(t.surface)); }
-                    }
-                    let short: String = name.chars().take(10).collect();
-                    ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, short, FontId::proportional(10.5), c(t.fg));
+        let (mut launch, mut unpin) = (None, None);
+        ui.horizontal_wrapped(|ui| {
+            for p in apps {
+                let name = self.app_name(p);
+                let (rect, r) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::click());
+                if r.hovered() { ui.painter().rect_filled(rect, 10.0, c(t.surface)); }
+                let icon = Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(30.0));
+                match self.icon(&ctx, p) {
+                    Some(tex) => { egui::Image::new((tex.id(), Vec2::splat(30.0))).paint_at(ui, icon); }
+                    None => { ui.painter().rect_filled(icon, 7.0, c(t.surface)); }
+                }
+                let short: String = name.chars().take(10).collect();
+                ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, short, FontId::proportional(10.5), c(t.fg));
+                if can_unpin {
                     // A small × in the corner unpins (so does a right-click).
                     let x_rect = Rect::from_center_size(rect.right_top() + vec2(-9.0, 9.0), Vec2::splat(16.0));
                     let x = ui.interact(x_rect, ui.scope_id().with("unpin").with(p.as_str()), Sense::click());
@@ -805,26 +803,98 @@ impl Bar {
                         ui.painter().line_segment([k.left_top(), k.right_bottom()], st);
                         ui.painter().line_segment([k.right_top(), k.left_bottom()], st);
                     }
-                    if x.on_hover_text("Unpin").clicked() || r.secondary_clicked() { unpin = Some(p.clone()); }
-                    else if r.on_hover_text(format!("{name}\nright-click to unpin")).clicked() { launch = Some(p.clone()); }
+                    if x.on_hover_text("Unpin").clicked() || r.secondary_clicked() { unpin = Some(p.clone()); continue }
                 }
-            });
-            ui.add_space(6.0);
+                if r.on_hover_text(&name).clicked() { launch = Some(p.clone()); }
+            }
+        });
+        (launch, unpin)
+    }
+
+    /// The Ronin launcher: pinned and most-used apps, then every app, with search. ↑ ↓ choose,
+    /// Enter opens, right-click for pin, hide and show in folder.
+    fn pop_launcher(&mut self, ui: &mut egui::Ui) {
+        use ronin_core::launcher;
+        let t = self.theme();
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
+            ui.label(RichText::new("R O N I N").strong().size(15.0));
+        });
+        ui.add_space(6.0);
+        let before = self.search.clone();
+        let field = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search apps  ·  ↑ ↓ to choose, Enter to open").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+        if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
+        if self.search != before { self.launcher_sel = 0; }
+        let (up, down, enter) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter)));
+        ui.add_space(8.0);
+        let apps = self.all_apps.lock().ok().and_then(|l| l.clone());
+        let mut launch: Option<String> = None;
+        let mut pin: Option<String> = None;
+        let mut unpin: Option<String> = None;
+        let mut hide: Option<(String, bool)> = None;
+        let searching = !self.search.trim().is_empty();
+        if !searching {
+            if !self.settings.pinned.is_empty() {
+                ui.label(RichText::new("PINNED").color(c(t.accent)).size(11.0));
+                let pinned: Vec<String> = self.settings.pinned.iter().take(12).cloned().collect();
+                let (l, u) = self.icon_row(ui, &pinned, true);
+                launch = launch.or(l); unpin = unpin.or(u);
+                ui.add_space(4.0);
+            }
+            // Most used: apps you open often that are not pinned yet.
+            let installed = apps.as_ref().map(|l| l.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+            let used: Vec<String> = launcher::most_used(&self.settings.launch_counts, 24).into_iter()
+                .filter(|a| !self.settings.pinned.contains(a) && installed.contains(a) && !self.settings.hidden_apps.contains(a)).take(6).collect();
+            if !used.is_empty() {
+                ui.label(RichText::new("MOST USED").color(c(t.accent)).size(11.0));
+                let (l, _) = self.icon_row(ui, &used, false);
+                launch = launch.or(l);
+                ui.add_space(4.0);
+            }
         }
-        ui.label(RichText::new(if self.search.trim().is_empty() { "ALL APPS" } else { "RESULTS" }).color(c(t.accent)).size(11.0));
+        let hidden_n = self.settings.hidden_apps.len();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(if searching { "RESULTS" } else { "ALL APPS" }).color(c(t.accent)).size(11.0));
+            if hidden_n > 0 {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if self.show_hidden { format!("hide {hidden_n} hidden") } else { format!("show {hidden_n} hidden") };
+                    if ui.add(egui::Button::new(RichText::new(label).size(11.0).color(c(t.muted))).frame(false)).clicked() { self.show_hidden = !self.show_hidden; }
+                });
+            }
+        });
         match apps {
             None => { ui.label(RichText::new("Reading your apps…").color(c(t.muted))); }
             Some(list) => {
-                let found: Vec<&(String, String)> = list.iter().filter(|(n, _)| pins::matches(n, &self.search)).collect();
-                if enter { if let Some((_, id)) = found.first() { launch = Some(id.clone()); } }
+                let mut found: Vec<(u32, &(String, String))> = list.iter()
+                    .filter(|(_, id)| self.show_hidden || !self.settings.hidden_apps.contains(id))
+                    .filter_map(|a| launcher::rank(&a.0, &self.search).map(|r| (r, a)))
+                    .collect();
+                if searching { found.sort_by_key(|(r, (n, _))| (*r, n.to_lowercase())); }
+                let n = found.len();
+                if n > 0 {
+                    if down { self.launcher_sel = (self.launcher_sel + 1).min(n - 1); }
+                    if up { self.launcher_sel = self.launcher_sel.saturating_sub(1); }
+                    self.launcher_sel = self.launcher_sel.min(n - 1);
+                    if enter && (searching || self.launcher_sel > 0) { launch = Some(found[self.launcher_sel].1 .1.clone()); }
+                }
+                let sel = self.launcher_sel;
+                let row_h = 30.0;
                 let footer = 44.0;
-                egui::ScrollArea::vertical().max_height((ui.available_height() - footer).max(80.0)).auto_shrink([false, false]).show_rows(ui, 30.0, found.len(), |ui, range| {
-                    for (name, id) in &found[range] {
-                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
-                        if r.hovered() { ui.painter().rect_filled(rect, 8.0, c(t.surface)); }
+                let mut area = egui::ScrollArea::vertical().max_height((ui.available_height() - footer).max(80.0)).auto_shrink([false, false]);
+                // Keep the chosen app in view while ↑ ↓ move through the list.
+                if up || down { area = area.vertical_scroll_offset(((sel as f32) - 4.0).max(0.0) * (row_h + ui.spacing().item_spacing.y)); }
+                area.show_rows(ui, row_h, n, |ui, range| {
+                    for k in range {
+                        let (_, (name, id)) = found[k];
+                        let is_hidden = self.settings.hidden_apps.contains(id);
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        if k == sel && (searching || up || down || self.launcher_sel > 0) { ui.painter().rect_filled(rect, 8.0, c(t.accent).gamma_multiply(0.22)); }
+                        else if r.hovered() { ui.painter().rect_filled(rect, 8.0, c(t.surface)); }
                         let icon = Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), Vec2::splat(22.0));
-                        if let Some(tex) = self.icon(&ctx, id) { egui::Image::new((tex.id(), Vec2::splat(22.0))).paint_at(ui, icon); }
-                        ui.painter().text(egui::pos2(rect.left() + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, name, FontId::proportional(13.5), c(t.fg));
+                        if let Some(tex) = self.icon(&ctx, id) { egui::Image::new((tex.id(), Vec2::splat(22.0))).tint(if is_hidden { Color32::from_white_alpha(110) } else { Color32::WHITE }).paint_at(ui, icon); }
+                        ui.painter().text(egui::pos2(rect.left() + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, name, FontId::proportional(13.5), if is_hidden { c(t.muted) } else { c(t.fg) });
                         let pinned = self.settings.pinned.iter().any(|p| p == id);
                         // Pin / Unpin button at the end of the row (always shown for pinned apps).
                         let pill = Rect::from_min_max(egui::pos2(rect.right() - 66.0, rect.top() + 4.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 4.0));
@@ -837,17 +907,30 @@ impl Bar {
                         }
                         if b.clicked() { if pinned { unpin = Some(id.clone()) } else { pin = Some(id.clone()) } }
                         else if r.clicked() { launch = Some(id.clone()); }
-                        else if r.secondary_clicked() { if pinned { unpin = Some(id.clone()) } else { pin = Some(id.clone()) } }
+                        // Right-click: everything you can do with the app.
+                        r.context_menu(|ui| {
+                            if ui.button(if pinned { "Unpin from the bar" } else { "Pin to the bar" }).clicked() {
+                                if pinned { unpin = Some(id.clone()) } else { pin = Some(id.clone()) }
+                                ui.close();
+                            }
+                            if ui.button(if is_hidden { "Show in the launcher again" } else { "Hide from the launcher" }).clicked() { hide = Some((id.clone(), !is_hidden)); ui.close(); }
+                            if !pins::is_app_id(id) && ui.button("Show in folder").clicked() { dock::show_in_folder(id); ui.close(); }
+                        });
                     }
                 });
-                if found.is_empty() { ui.label(RichText::new("No app matches.").color(c(t.muted))); }
+                if n == 0 { ui.label(RichText::new(if searching { "No app matches." } else { "No apps to show." }).color(c(t.muted))); }
             }
         }
         if let Some(p) = pin { self.pin(&p); }
         if let Some(p) = unpin { if let Some(i) = self.settings.pinned.iter().position(|q| *q == p) { self.unpin(i); } }
-        if let Some(id) = launch { dock::launch(&id); self.close_popup(); return }
+        if let Some((id, on)) = hide {
+            if on { if !self.settings.hidden_apps.contains(&id) { self.settings.hidden_apps.push(id); } } else { self.settings.hidden_apps.retain(|a| *a != id); }
+            self.save();
+        }
+        if let Some(id) = launch { self.launch_app(&id); return }
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
+                ui.label(RichText::new("Right-click an app to pin, hide or find it").color(c(t.muted)).size(11.0));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let (r, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
                     if resp.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
