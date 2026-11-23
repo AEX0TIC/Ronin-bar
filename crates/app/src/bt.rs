@@ -1,14 +1,17 @@
-//! Bluetooth devices for Ronin's Bluetooth popup, on a thread of their own: paired devices and
-//! whether they are connected, connecting and disconnecting headphones and speakers (the same
-//! way Windows' own panel does it, through the audio driver), searching for nearby devices,
-//! pairing and forgetting. Only Windows' public device functions are used.
+//! Bluetooth devices for Ronin's Bluetooth popup. Windows reports every change to the device
+//! list as it happens (a device added, connected, disconnected, removed), the same way its own
+//! Settings page is kept up to date, so nothing is asked again and again and nothing waits.
+//! Connecting and disconnecting headphones and speakers goes through their audio driver, as
+//! Windows' own panel does; pairing and forgetting use Windows' public pairing functions.
 use ronin_core::bluetooth as rules;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use windows::core::{Interface, GUID, HSTRING};
-use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind, DevicePairingResultStatus, DeviceUnpairingResultStatus};
-use windows::Foundation::IReference;
+use windows::core::{Interface, Ref, GUID, HSTRING};
+use windows::Devices::Enumeration::{
+    DeviceInformation, DeviceInformationKind, DeviceInformationUpdate, DevicePairingResultStatus, DeviceUnpairingResultStatus, DeviceWatcher,
+};
+use windows::Foundation::{IReference, TypedEventHandler};
 use windows_collections::IIterable;
 use crate::winrt::{spawn, wait};
 
@@ -26,16 +29,16 @@ pub struct Device {
 
 #[derive(Clone, Debug, Default)]
 pub struct BtState {
-    /// Paired devices, connected ones first (None until read).
+    /// Paired devices, connected ones first (None until Windows has listed them).
     pub paired: Option<Vec<Device>>,
-    /// Devices found by the last search, not paired yet.
+    /// Devices found by the current or last search, not paired yet.
     pub nearby: Option<Vec<Device>>,
     pub scanning: bool,
     pub busy: Option<String>,
     pub error: Option<String>,
 }
 
-pub enum BtCmd { Refresh, Scan, Connect(String), Disconnect(String), Pair(String), Forget(String) }
+pub enum BtCmd { Scan, StopScan, Connect(String), Disconnect(String), Pair(String), Forget(String), /* internal: */ CheckAudio }
 
 pub fn start(wake: eframe::egui::Context) -> (Arc<Mutex<BtState>>, Sender<BtCmd>) {
     let state = Arc::new(Mutex::new(BtState::default()));
@@ -51,34 +54,90 @@ const CONNECTED: &str = "System.Devices.Aep.IsConnected";
 const ADDRESS: &str = "System.Devices.Aep.DeviceAddress";
 /// Windows' Bluetooth audio commands (KSPROPSETID_BtAudio): 0 = reconnect, 1 = disconnect.
 const BT_AUDIO: GUID = GUID::from_u128(0x7fa06c40_b8f6_4c7e_8556_e8c33a12e54d);
+/// How long a search for new devices runs.
+const SEARCH: Duration = Duration::from_secs(25);
 
-/// Bluetooth devices Windows knows, paired or not.
-fn find(paired: bool) -> Result<Vec<Device>, String> {
+type Shared = Arc<Mutex<BtState>>;
+
+fn prop<T: windows::core::RuntimeType + 'static>(p: &windows_collections::IMapView<HSTRING, windows::core::IInspectable>, key: &str) -> Option<T> {
+    p.Lookup(&HSTRING::from(key)).ok()?.cast::<IReference<T>>().ok()?.Value().ok()
+}
+
+fn device(d: &DeviceInformation) -> Option<Device> {
+    let name = d.Name().ok()?.to_string();
+    if !rules::worth_listing(&name) { return None }
+    let p = d.Properties().ok();
+    let connected = p.as_ref().and_then(|p| prop::<bool>(p, CONNECTED)).unwrap_or(false);
+    let addr = p.as_ref().and_then(|p| prop::<HSTRING>(p, ADDRESS)).and_then(|a| rules::address(&a.to_string()));
+    Some(Device { id: d.Id().ok()?.to_string(), name, addr, connected, audio: false })
+}
+
+fn list(s: &mut BtState, paired: bool) -> &mut Vec<Device> {
+    if paired { s.paired.get_or_insert_with(Vec::new) } else { s.nearby.get_or_insert_with(Vec::new) }
+}
+
+fn tidy(l: &mut [Device]) { l.sort_by_key(|d| (!d.connected, d.name.to_lowercase())); }
+
+/// Starts a watcher: Windows calls back for every device added, changed or removed.
+fn watch(state: &Shared, wake: &eframe::egui::Context, tx: &Sender<BtCmd>, paired: bool) -> Option<DeviceWatcher> {
     let aqs = HSTRING::from(format!(
         "(System.Devices.Aep.ProtocolId:=\"{CLASSIC}\" OR System.Devices.Aep.ProtocolId:=\"{LOW_ENERGY}\") AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#{}",
         if paired { "True" } else { "False" }));
     let props = IIterable::<HSTRING>::from(vec![HSTRING::from(CONNECTED), HSTRING::from(ADDRESS)]);
-    // Paired devices come back at once; a search for new ones listens for a while.
-    let limit = Duration::from_secs(if paired { 8 } else { 30 });
-    let list = wait(DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::AssociationEndpoint), limit)?;
-    let mut out: Vec<Device> = Vec::new();
-    for d in list {
-        let name = d.Name().map(|n| n.to_string()).unwrap_or_default();
-        if !rules::worth_listing(&name) { continue }
-        let p = d.Properties().ok();
-        let get = |k: &str| p.as_ref().and_then(|p| p.Lookup(&HSTRING::from(k)).ok());
-        let connected = get(CONNECTED).and_then(|v| v.cast::<IReference<bool>>().ok()).and_then(|r| r.Value().ok()).unwrap_or(false);
-        let addr = get(ADDRESS).and_then(|v| v.cast::<IReference<HSTRING>>().ok()).and_then(|r| r.Value().ok()).and_then(|a| rules::address(&a.to_string()));
-        let dev = Device { id: d.Id().map(|i| i.to_string()).unwrap_or_default(), name, addr, connected, audio: false };
-        // A device with both classic and Low Energy shows up twice: keep one, connected first.
-        match out.iter_mut().find(|o| o.name == dev.name) {
-            Some(o) => { if dev.connected && !o.connected { *o = dev; } }
-            None => out.push(dev),
+    let w = DeviceInformation::CreateWatcherWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::AssociationEndpoint).ok()?;
+    let (st, wk, t) = (state.clone(), wake.clone(), tx.clone());
+    let _ = w.Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(move |_, d: Ref<DeviceInformation>| {
+        if let Some(dev) = d.ok().ok().and_then(device) {
+            if let Ok(mut s) = st.lock() {
+                let l = list(&mut s, paired);
+                // A device with both classic and Low Energy shows up twice: keep one.
+                match l.iter_mut().find(|o| o.name == dev.name) {
+                    Some(o) => { if dev.connected && !o.connected { let audio = o.audio; *o = Device { audio, ..dev }; } }
+                    None => l.push(dev),
+                }
+                tidy(l);
+            }
+            wk.request_repaint();
+            if paired { let _ = t.send(BtCmd::CheckAudio); }
         }
-        if out.len() >= 60 { break }
-    }
-    out.sort_by_key(|d| (!d.connected, d.name.to_lowercase()));
-    Ok(out)
+        Ok(())
+    }));
+    let (st, wk) = (state.clone(), wake.clone());
+    let _ = w.Updated(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, u: Ref<DeviceInformationUpdate>| {
+        if let Ok(u) = u.ok() {
+            let id = u.Id().map(|i| i.to_string()).unwrap_or_default();
+            let on = u.Properties().ok().and_then(|p| prop::<bool>(&p, CONNECTED));
+            if let (Some(on), Ok(mut s)) = (on, st.lock()) {
+                let l = list(&mut s, paired);
+                if let Some(d) = l.iter_mut().find(|d| d.id == id) { d.connected = on; }
+                tidy(l);
+                // A connect or disconnect asked from the popup is done once Windows reports it.
+                if s.busy.is_some() { s.busy = None; }
+            }
+            wk.request_repaint();
+        }
+        Ok(())
+    }));
+    let (st, wk) = (state.clone(), wake.clone());
+    let _ = w.Removed(&TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(move |_, u: Ref<DeviceInformationUpdate>| {
+        if let Ok(u) = u.ok() {
+            let id = u.Id().map(|i| i.to_string()).unwrap_or_default();
+            if let Ok(mut s) = st.lock() { list(&mut s, paired).retain(|d| d.id != id); }
+            wk.request_repaint();
+        }
+        Ok(())
+    }));
+    let (st, wk) = (state.clone(), wake.clone());
+    let _ = w.EnumerationCompleted(&TypedEventHandler::<DeviceWatcher, windows::core::IInspectable>::new(move |_, _| {
+        if let Ok(mut s) = st.lock() {
+            list(&mut s, paired);   // an empty list now means "none", not "still reading"
+            if !paired { s.scanning = false; }
+        }
+        wk.request_repaint();
+        Ok(())
+    }));
+    w.Start().ok()?;
+    Some(w)
 }
 
 /// The audio driver controls of every Bluetooth headphone, speaker and headset (connected or
@@ -143,62 +202,65 @@ fn forget(id: &str) -> Result<(), String> {
     }
 }
 
-enum Kind { Connect, Other }
-
-fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, again: Sender<BtCmd>, wake: eframe::egui::Context) {
+fn run(state: Shared, rx: Receiver<BtCmd>, again: Sender<BtCmd>, wake: eframe::egui::Context) {
     crate::sys::com_init_mta();
     let set = |f: &dyn Fn(&mut BtState)| { if let Ok(mut s) = state.lock() { f(&mut s); } wake.request_repaint(); };
-    let refresh = || {
-        let audio: Vec<String> = audio_controls().into_iter().map(|(id, _)| id).collect();
-        match find(true) {
-            Ok(mut list) => {
-                for d in &mut list { d.audio = d.addr.as_deref().map(|a| audio.iter().any(|id| rules::id_has_address(id, a))).unwrap_or(false); }
-                set(&|s| s.paired = Some(list.clone()));
-            }
-            Err(e) => set(&|s| { if s.paired.is_none() { s.paired = Some(Vec::new()); } s.error = Some(format!("Could not read your devices ({e}). Press refresh.")); }),
-        }
-    };
-    let mut later: Vec<Instant> = Vec::new();
-    let mut last_read = Instant::now() - Duration::from_secs(60);
+    // Paired devices are watched for as long as the bar runs (Windows' Settings does the same).
+    let paired = watch(&state, &wake, &again, true);
+    if paired.is_none() { set(&|s| { s.paired = Some(Vec::new()); s.error = Some("Windows did not list your Bluetooth devices.".into()); }); }
+    let mut search: Option<(DeviceWatcher, Instant)> = None;
+    let mut audio_at = Instant::now() - Duration::from_secs(60);
     loop {
-        let wait = later.iter().min().map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(3600));
-        let cmd = match rx.recv_timeout(wait.max(Duration::from_millis(30))) {
+        let wait_for = search.as_ref().map(|(_, at)| (*at + SEARCH).saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(3600));
+        let cmd = match rx.recv_timeout(wait_for.max(Duration::from_millis(50))) {
             Ok(c) => Some(c),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         };
-        let cmd_kind = match &cmd { Some(BtCmd::Connect(_)) => Kind::Connect, _ => Kind::Other };
-        let soon = |ms: &[u64]| ms.iter().map(|m| Instant::now() + Duration::from_millis(*m)).collect::<Vec<_>>();
         match cmd {
-            Some(BtCmd::Refresh) => {
-                // Several opens in a row need only one read.
-                if last_read.elapsed() > Duration::from_millis(1500) { set(&|s| s.error = None); refresh(); last_read = Instant::now(); }
-            }
             Some(BtCmd::Scan) => {
-                if state.lock().map(|s| s.scanning).unwrap_or(true) { continue }
-                set(&|s| { s.scanning = true; s.error = None; });
-                // Searching takes several seconds; it runs beside this thread so the buttons keep working.
-                let (st, wk) = (state.clone(), wake.clone());
-                spawn(move || {
-                    let found = find(false);
-                    if let Ok(mut s) = st.lock() {
-                        s.scanning = false;
-                        match found { Ok(l) => s.nearby = Some(l), Err(e) => { s.nearby.get_or_insert_with(Vec::new); s.error = Some(format!("Search stopped: {e}")); } }
-                    }
-                    wk.request_repaint();
+                if let Some((w, _)) = search.take() { let _ = w.Stop(); }
+                set(&|s| { s.nearby = Some(Vec::new()); s.scanning = true; s.error = None; });
+                search = watch(&state, &wake, &again, false).map(|w| (w, Instant::now()));
+                if search.is_none() { set(&|s| { s.scanning = false; s.error = Some("Windows could not start a search.".into()); }); }
+            }
+            Some(BtCmd::StopScan) => {
+                if let Some((w, _)) = search.take() { let _ = w.Stop(); }
+                set(&|s| s.scanning = false);
+            }
+            Some(BtCmd::CheckAudio) => {
+                // Which paired devices are headphones or speakers (a burst of new devices needs one look).
+                if audio_at.elapsed() < Duration::from_millis(800) { continue }
+                audio_at = Instant::now();
+                let ids: Vec<String> = audio_controls().into_iter().map(|(id, _)| id).collect();
+                set(&|s| if let Some(l) = s.paired.as_mut() {
+                    for d in l.iter_mut() { d.audio = d.addr.as_deref().map(|a| ids.iter().any(|id| rules::id_has_address(id, a))).unwrap_or(false); }
                 });
             }
-            Some(BtCmd::Connect(addr)) | Some(BtCmd::Disconnect(addr)) => {
-                let on = matches!(cmd_kind, Kind::Connect);
-                set(&|s| { s.busy = Some(if on { "Connecting…".into() } else { "Disconnecting…".into() }); s.error = None; });
-                let r = audio_connect(&addr, on);
-                set(&|s| { s.busy = None; s.error = r.clone().err(); });
-                later.extend(soon(&[700, 2000, 4000, 7000]));
+            Some(c @ (BtCmd::Connect(_) | BtCmd::Disconnect(_))) => {
+                let (addr, on) = match c { BtCmd::Connect(a) => (a, true), BtCmd::Disconnect(a) => (a, false), _ => continue };
+                let (st, wk) = (state.clone(), wake.clone());
+                spawn(move || {
+                    let r = audio_connect(&addr, on);
+                    if let Ok(mut s) = st.lock() {
+                        if let Err(e) = r {
+                            s.busy = None;
+                            s.error = Some(e);
+                            // Put back what Windows really has.
+                            if let Some(d) = s.paired.as_mut().and_then(|l| l.iter_mut().find(|d| d.addr.as_deref() == Some(addr.as_str()))) { d.connected = !on; }
+                        }
+                    }
+                    wk.request_repaint();
+                    // Windows' report clears "Connecting…"; if none comes, clear it anyway.
+                    std::thread::sleep(Duration::from_secs(8));
+                    if let Ok(mut s) = st.lock() { s.busy = None; }
+                    wk.request_repaint();
+                });
             }
             Some(BtCmd::Pair(id)) => {
                 set(&|s| { s.busy = Some("Pairing… (accept on the device if it asks)".into()); s.error = None; });
                 // Pairing waits for the person (a PIN or a button on the device): its own thread.
-                let (st, wk, tx) = (state.clone(), wake.clone(), again.clone());
+                let (st, wk) = (state.clone(), wake.clone());
                 spawn(move || {
                     let r = pair(&id);
                     if let Ok(mut s) = st.lock() {
@@ -207,19 +269,23 @@ fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, again: Sender<BtCmd>, wa
                         if r.is_ok() { if let Some(n) = s.nearby.as_mut() { n.retain(|d| d.id != id); } }
                     }
                     wk.request_repaint();
-                    let _ = tx.send(BtCmd::Refresh);
                 });
             }
             Some(BtCmd::Forget(id)) => {
-                let r = forget(&id);
-                set(&|s| { s.error = r.clone().err(); if r.is_ok() { if let Some(p) = s.paired.as_mut() { p.retain(|d| d.id != id); } } });
-                later.extend(soon(&[500]));
+                let (st, wk) = (state.clone(), wake.clone());
+                spawn(move || {
+                    let r = forget(&id);
+                    if let Ok(mut s) = st.lock() { s.error = r.err(); }
+                    wk.request_repaint();
+                });
             }
             None => {}
         }
-        if later.iter().any(|t| *t <= Instant::now()) {
-            later.retain(|t| *t > Instant::now());
-            refresh();
+        // A search ends by itself after a while.
+        if search.as_ref().map(|(_, at)| at.elapsed() >= SEARCH).unwrap_or(false) {
+            if let Some((w, _)) = search.take() { let _ = w.Stop(); }
+            set(&|s| s.scanning = false);
         }
+        let _ = &paired;
     }
 }
