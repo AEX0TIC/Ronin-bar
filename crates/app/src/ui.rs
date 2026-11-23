@@ -22,11 +22,11 @@ const SLOT: f32 = 34.0;
 const CLOCK_W: f32 = 170.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
+enum Tab { Wallpapers, Themes, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Quick, Update }
+enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Bluetooth, Quick, Update }
 
 /// The pages of the quick settings popup.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,7 +34,7 @@ enum QuickView { Main, Night, Access, Project }
 
 /// What a quick settings tile does when clicked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum QAct { Wifi, WifiList, Bluetooth, BluetoothDevices, Airplane, Night, NightPage, Hotspot, HotspotSettings, Access, Project, Cast, Captions, Nearby, Battery, Snip }
+enum QAct { Airplane, Night, NightPage, Hotspot, HotspotSettings, Access, Project, Cast, Captions, Nearby, Battery, Snip }
 
 /// How often to look for a new version (the first look is 20 s after start).
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
@@ -127,13 +127,10 @@ pub struct Bar {
     icons: HashMap<String, Option<egui::TextureHandle>>,
     /// Wallpaper previews by wallpaper id (`None` = the file could not be read).
     thumbs: HashMap<String, Option<egui::TextureHandle>>,
-    /// Start-menu apps, read when the Apps tab is first opened.
-    apps: Option<Vec<(String, String)>>,
-    query: String,
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 490.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 560.0), Popup::Update => (390.0, 370.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (340.0, 400.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (390.0, 370.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -180,9 +177,9 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
-              active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
+              active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
@@ -216,6 +213,7 @@ impl Bar {
     /// Fresh data for a popup that has just appeared.
     fn opened(&mut self, p: Popup) {
         if matches!(p, Popup::Network | Popup::Quick) { let _ = self.net_tx.send(net::NetCmd::Refresh); }
+        if p == Popup::Bluetooth { let _ = self.net_tx.send(net::NetCmd::Devices); }
         if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
         if p == Popup::Quick { self.quick_view = QuickView::Main; self.quick_note = None; self.sticky = sys::sticky_keys(); }
         if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
@@ -462,19 +460,21 @@ impl Bar {
     fn dock_items(&mut self, ui: &mut egui::Ui, room: f32) {
         let t = self.theme();
         let mut slots = (room / SLOT).floor().max(0.0) as usize;
-        // Pinned apps: click opens, right-click manages them.
+        // Pinned apps: click opens, right-click unpins.
         let pinned = self.settings.pinned.clone();
-        for p in pinned.iter().take(slots) {
+        let mut unpin: Option<usize> = None;
+        for (i, p) in pinned.iter().take(slots).enumerate() {
             let name = self.app_name(p);
             let tex = self.icon(ui.ctx(), p);
-            let r = self.slot(ui, tex, &name, false, false);
-            if r.clicked() && !dock::launch(p) { self.open(Tab::Apps); }
-            if r.secondary_clicked() { self.open(Tab::Apps); }
+            let r = self.slot(ui, tex, &name, false, false).on_hover_text(format!("{name}\nright-click to unpin"));
+            if r.clicked() && !dock::launch(p) { self.toggle_popup(Popup::Launcher, 40.0); }
+            if r.secondary_clicked() { unpin = Some(i); }
         }
+        if let Some(i) = unpin { self.unpin(i); }
         slots = slots.saturating_sub(pinned.len());
         if pinned.is_empty() {
             let r = self.chip(ui, Some("pin apps".into()), false, |p, g| glyph::draw(p, g, Glyph::Apps, c(t.muted)));
-            if r.clicked() { self.open(Tab::Apps); }
+            if r.on_hover_text("Open the Ronin launcher and click Pin next to an app").clicked() { self.toggle_popup(Popup::Launcher, 40.0); }
             slots = slots.saturating_sub(3);
         }
         if !self.wins.is_empty() && slots > 0 { self.divider(ui); }
@@ -552,8 +552,8 @@ impl Bar {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
                 let lit = |tab: Tab| self.panel && self.tab == tab;
-                let (lp, ls, la, lt, lw, lv) = (lit(Tab::Power), lit(Tab::Settings), lit(Tab::Apps), lit(Tab::Themes), lit(Tab::Wallpapers), lit(Tab::Sound));
-                let pw = self.chip(ui, None, lp || self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
+                let (ls, lt, lw) = (lit(Tab::Settings), lit(Tab::Themes), lit(Tab::Wallpapers));
+                let pw = self.chip(ui, None, self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
                 if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, pw.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
@@ -563,7 +563,6 @@ impl Bar {
                     let r = self.chip(ui, None, self.popup == Some(Popup::Update), |p, g| glyph::draw(p, g, Glyph::Update, accent));
                     if r.on_hover_text(format!("Ronin Bar {v} is available")).clicked() { self.toggle_popup(Popup::Update, self.screen_w - 210.0); }
                 }
-                if self.chip(ui, None, la, |p, g| glyph::draw(p, g, Glyph::Apps, fg)).clicked() { self.open(Tab::Apps); }
                 if self.chip(ui, None, lt, |p, g| glyph::draw(p, g, Glyph::Theme, fg)).clicked() { self.open(Tab::Themes); }
                 let wall = self.chip(ui, None, lw, |p, g| glyph::draw(p, g, Glyph::Wallpaper, fg));
                 if wall.clicked() { self.open(Tab::Wallpapers); }
@@ -571,7 +570,7 @@ impl Bar {
                 self.divider(ui);
                 if let Some((v, m)) = s.volume {
                     let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
-                    let r = self.chip(ui, Some(text), lv || self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
+                    let r = self.chip(ui, Some(text), self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
                     if r.clicked() { self.toggle_popup(Popup::Sound, r.rect.center().x); }
                     if r.secondary_clicked() || r.middle_clicked() { self.set_mute(!m); }
                     if r.hovered() {
@@ -585,9 +584,17 @@ impl Bar {
                     let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
                     if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
                 }
-                // Network: Ronin's quick settings (Wi-Fi, Bluetooth, night light and the rest).
-                let r = self.chip(ui, None, matches!(self.popup, Some(Popup::Quick | Popup::Network)), |p, g| glyph::network(p, g, s.online, fg, muted));
-                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Quick, r.rect.center().x); }
+                // Quick settings: airplane mode, night light, hotspot and the rest.
+                let r = self.chip(ui, None, self.popup == Some(Popup::Quick), |p, g| glyph::draw(p, g, Glyph::Toggles, fg)).on_hover_text("Quick settings");
+                if r.clicked() { self.toggle_popup(Popup::Quick, r.rect.center().x); }
+                // Bluetooth and Wi-Fi, each with its own popup.
+                let (wifi_on, bt_on) = self.net.lock().map(|n| (n.wifi_on, n.bluetooth_on)).unwrap_or((None, None));
+                if let Some(on) = bt_on {
+                    let r = self.chip(ui, None, self.popup == Some(Popup::Bluetooth), |p, g| glyph::quick(p, g.shrink(1.0), glyph::Quick::Bluetooth, if on { fg } else { muted })).on_hover_text(if on { "Bluetooth on" } else { "Bluetooth off" });
+                    if r.clicked() { self.toggle_popup(Popup::Bluetooth, r.rect.center().x); }
+                }
+                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, s.online && wifi_on != Some(false), fg, muted)).on_hover_text("Wi-Fi");
+                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
                 if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
@@ -872,13 +879,9 @@ impl Bar {
         let t = self.theme();
         let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
         let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
-        let wifi_name = st.networks.iter().find(|n| n.connected).map(|n| n.ssid.clone())
-            .unwrap_or_else(|| if st.wifi_on == Some(true) { "Not connected".into() } else { "Wi-Fi".into() });
         let radios_known = st.wifi_on.is_some() || st.bluetooth_on.is_some();
         // (icon, name, on/off if it is a switch, has a page, click, arrow click)
         let mut tiles: Vec<(Q, String, Option<bool>, bool, QAct, QAct)> = vec![
-            (Q::Wifi, wifi_name, Some(st.wifi_on.unwrap_or(false)), true, QAct::Wifi, QAct::WifiList),
-            (Q::Bluetooth, "Bluetooth".into(), st.bluetooth_on, true, QAct::Bluetooth, QAct::BluetoothDevices),
             (Q::Airplane, "Airplane mode".into(), radios_known.then(|| st.airplane()), false, QAct::Airplane, QAct::Airplane),
             (Q::Night, "Night light".into(), Some(self.settings.night_light), true, QAct::Night, QAct::NightPage),
             (Q::Hotspot, "Mobile hotspot".into(), st.hotspot_on, st.hotspot_on.is_some(), if st.hotspot_on.is_some() { QAct::Hotspot } else { QAct::HotspotSettings }, QAct::HotspotSettings),
@@ -958,10 +961,6 @@ impl Bar {
     fn quick_act(&mut self, a: QAct, st: &net::NetState) {
         self.quick_note = None;
         match a {
-            QAct::Wifi => self.radio(false, st.wifi_on != Some(true)),
-            QAct::WifiList => { self.joining = None; self.go(Popup::Network); }
-            QAct::Bluetooth => self.radio(true, st.bluetooth_on != Some(true)),
-            QAct::BluetoothDevices => sys::open_settings("bluetooth"),
             QAct::Airplane => {
                 let on = !st.airplane();
                 if let Ok(mut s) = self.net.lock() {
@@ -1099,7 +1098,7 @@ impl Bar {
         ui.add_space(4.0);
         let mut action: Option<net::NetCmd> = None;
         let mut open_join: Option<String> = None;
-        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(340.0).auto_shrink([false, true]).show(ui, |ui| {
             if st.wifi_on == Some(false) { ui.label(RichText::new("Wi-Fi is off.").color(c(t.muted))); return }
             for n in &st.networks {
                 ui.horizontal(|ui| {
@@ -1153,18 +1152,55 @@ impl Bar {
         });
         if let Some(ssid) = open_join { self.joining = Some((ssid, String::new())); }
         if let Some(a) = action { let _ = self.net_tx.send(a); }
-        ui.separator();
+        self.settings_link(ui, "Network settings", "network-status");
+    }
+
+    fn pop_bluetooth(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Bluetooth").strong());
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+            glyph::quick(ui.painter(), r, glyph::Quick::Bluetooth, c(t.accent));
+            ui.label(RichText::new("Bluetooth").strong().size(15.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                match st.bluetooth_on {
-                    Some(on) => { if self.switch(ui, on).clicked() { self.radio(true, !on); } }
-                    None => { ui.label(RichText::new("none").color(c(t.muted)).size(12.0)); }
-                }
-                if ui.add(egui::Button::new(RichText::new("devices").size(12.0).color(c(t.muted))).frame(false)).clicked() { sys::open_settings("bluetooth"); }
+                if let Some(on) = st.bluetooth_on { if self.switch(ui, on).clicked() { self.radio(true, !on); } }
             });
         });
-        self.settings_link(ui, "Network settings", "network-status");
+        if let Some(e) = &st.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+        ui.add_space(8.0);
+        match st.bluetooth_on {
+            None => { ui.label(RichText::new("This PC has no Bluetooth.").color(c(t.muted))); return }
+            Some(false) => { ui.label(RichText::new("Bluetooth is off.").color(c(t.muted))); }
+            Some(true) => {
+                ui.label(RichText::new("PAIRED DEVICES").color(c(t.accent)).size(11.0));
+                ui.add_space(2.0);
+                match &st.bt_devices {
+                    None => { ui.label(RichText::new("Reading your devices…").color(c(t.muted))); }
+                    Some(list) if list.is_empty() => { ui.label(RichText::new("No devices paired yet.").color(c(t.muted))); }
+                    Some(list) => {
+                        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
+                            for (name, connected) in list {
+                                ui.horizontal(|ui| {
+                                    ui.painter().circle_filled(ui.cursor().min + vec2(5.0, 10.0), 3.5, if *connected { c(t.accent) } else { c(t.surface) });
+                                    ui.add_space(14.0);
+                                    ui.label(RichText::new(name).size(14.0));
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(RichText::new(if *connected { "connected" } else { "paired" }).color(c(if *connected { t.accent } else { t.muted })).size(12.0));
+                                    });
+                                });
+                                ui.add_space(2.0);
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Add a device").clicked() { sys::open_settings("bluetooth"); }
+                if ui.button("refresh").clicked() { let _ = self.net_tx.send(net::NetCmd::Devices); }
+            });
+        });
     }
 
     fn pop_battery(&mut self, ui: &mut egui::Ui) {
@@ -1241,44 +1277,14 @@ impl Bar {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            for (label, tab) in [("Apps", Tab::Apps), ("Wallpapers", Tab::Wallpapers), ("Themes", Tab::Themes), ("Sound", Tab::Sound), ("Power", Tab::Power), ("Settings", Tab::Settings)] {
+            for (label, tab) in [("Wallpapers", Tab::Wallpapers), ("Themes", Tab::Themes), ("Settings", Tab::Settings)] {
                 if ui.selectable_label(self.tab == tab, label).clicked() { self.tab = tab; self.confirm = None; }
             }
         });
         ui.separator();
         match self.tab {
-            Tab::Apps => self.tab_apps(ui),
             Tab::Wallpapers => self.tab_wallpapers(ui),
             Tab::Themes => self.tab_themes(ui),
-            Tab::Sound => {
-                let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
-                match s.volume {
-                    None => { ui.label("No sound device found."); }
-                    Some((v, m)) => {
-                        let mut pct = (v * 100.0).round();
-                        ui.horizontal(|ui| {
-                            ui.label("Volume");
-                            ui.spacing_mut().slider_width = 300.0;
-                            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() { self.set_volume(pct / 100.0); }
-                        });
-                        let mut mute = m;
-                        if ui.checkbox(&mut mute, "Mute").changed() { self.set_mute(mute); }
-                        ui.add_space(8.0);
-                        ui.label(RichText::new("On the bar: click the speaker to mute, scroll over it to change the volume.").color(c(t.muted)).size(12.0));
-                    }
-                }
-            }
-            Tab::Power => {
-                ui.label(RichText::new("Unsaved work in other apps is lost on restart and shut down.").color(c(t.muted)));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Lock").clicked() { let _ = self.tx.send(worker::Cmd::Lock); }
-                    for (label, what) in [("Sleep", Confirm::Sleep), ("Restart", Confirm::Restart), ("Shut down", Confirm::ShutDown)] {
-                        if ui.button(label).clicked() { self.confirm = Some(what); }
-                    }
-                });
-                self.confirm_row(ui);
-            }
             Tab::Settings => {
                 let mut on = self.settings.hide_taskbar;
                 if ui.checkbox(&mut on, "Replace the Windows taskbar").changed() {
@@ -1286,7 +1292,7 @@ impl Bar {
                     self.save();
                     if on { self.hide_taskbar(); } else { self.show_taskbar(); }
                 }
-                ui.label(RichText::new("Hides the Windows taskbar while Ronin Bar runs; it comes back when you quit or uninstall. The Ronin mark opens Start, the clock opens notifications, network and battery open quick settings.").color(c(t.muted)).size(12.0));
+                ui.label(RichText::new("Hides the Windows taskbar while Ronin Bar runs; it comes back when you quit or uninstall. The Ronin mark opens your apps, the clock the calendar, and the icons on the right Wi-Fi, Bluetooth, quick settings, battery and sound.").color(c(t.muted)).size(12.0));
                 ui.add_space(6.0);
                 let mut start = self.settings.start_with_windows;
                 if ui.checkbox(&mut start, "Start with Windows").changed() {
@@ -1374,60 +1380,6 @@ impl Bar {
             }
             if ui.button("No").clicked() { self.confirm = None; }
         });
-    }
-
-    fn tab_apps(&mut self, ui: &mut egui::Ui) {
-        let t = self.theme();
-        let ctx = ui.ctx().clone();
-        ui.label(RichText::new("Click an icon to open it · click the window in front to minimise it · middle-click closes a window · right-click an open window to pin its program.").color(c(t.muted)).size(12.0));
-        ui.add_space(4.0);
-        ui.label(RichText::new(format!("Pinned  {}/{}", self.settings.pinned.len(), pins::MAX_PINNED)).strong());
-        let pinned = self.settings.pinned.clone();
-        let mut action: Option<(usize, i8)> = None; // (index, -1 left / 1 right / 0 unpin)
-        for (i, p) in pinned.iter().enumerate() {
-            ui.horizontal(|ui| {
-                match self.icon(&ctx, p) { Some(tex) => { ui.add(egui::Image::new((tex.id(), Vec2::splat(18.0)))); } None => { ui.add_space(22.0); } }
-                ui.label(pins::display_name(p)).on_hover_text(p);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("unpin").clicked() { action = Some((i, 0)); }
-                    if ui.add_enabled(i + 1 < pinned.len(), egui::Button::new(">").small()).clicked() { action = Some((i, 1)); }
-                    if ui.add_enabled(i > 0, egui::Button::new("<").small()).clicked() { action = Some((i, -1)); }
-                });
-            });
-        }
-        if pinned.is_empty() { ui.label(RichText::new("Nothing pinned yet: pick apps below.").color(c(t.muted))); }
-        match action {
-            Some((i, 0)) => self.unpin(i),
-            Some((i, d)) => { let j = (i as isize + d as isize) as usize; self.settings.pinned.swap(i, j); self.save(); }
-            None => {}
-        }
-        ui.separator();
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("Start menu").strong());
-            ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("search").desired_width(220.0));
-            if ui.small_button("refresh").clicked() { self.apps = None; }
-        });
-        if self.apps.is_none() { self.apps = Some(dock::start_menu_apps()); }
-        let list: Vec<(String, String)> = self.apps.as_ref().map(|a| a.iter().filter(|(n, _)| pins::matches(n, &self.query)).cloned().collect()).unwrap_or_default();
-        let full = self.settings.pinned.len() >= pins::MAX_PINNED;
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show_rows(ui, 26.0, list.len(), |ui, range| {
-            for (name, path) in &list[range] {
-                ui.horizontal(|ui| {
-                    match self.icon(&ctx, path) { Some(tex) => { ui.add(egui::Image::new((tex.id(), Vec2::splat(18.0)))); } None => { ui.add_space(22.0); } }
-                    ui.label(name);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(path)) {
-                            ui.label(RichText::new("pinned").color(c(t.accent)).size(12.0));
-                        } else if ui.add_enabled(!full, egui::Button::new("pin").small()).clicked() {
-                            let p = path.clone();
-                            self.pin(&p);
-                        }
-                        if ui.small_button("open").clicked() { dock::launch(path); }
-                    });
-                });
-            }
-        });
-        if list.is_empty() { ui.label(RichText::new("No Start-menu apps match.").color(c(t.muted))); }
     }
 
     fn tab_wallpapers(&mut self, ui: &mut egui::Ui) {
@@ -1530,7 +1482,7 @@ impl Bar {
             };
             egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Quick => self.pop_quick(ui), Popup::Update => self.pop_update(ui) }
+                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Bluetooth => self.pop_bluetooth(ui), Popup::Quick => self.pop_quick(ui), Popup::Update => self.pop_update(ui) }
             });
             // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
             ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)

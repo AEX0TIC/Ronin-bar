@@ -1836,6 +1836,7 @@ dependencies = [
  "sha2",
  "ureq",
  "windows",
+ "windows-collections",
  "winreg 0.55.0",
 ]
 

@@ -1,7 +1,7 @@
 //! The dock: Start-menu apps, open windows, and their icons, using plain Windows APIs.
 use ronin_core::dock;
 use std::ffi::c_void;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use windows::core::{w, BOOL, HSTRING, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -43,31 +43,6 @@ impl Win {
 }
 
 fn h(hwnd: isize) -> HWND { HWND(hwnd as *mut c_void) }
-
-/// Every Start-menu shortcut (yours and all users'), named and sorted, without uninstallers and readmes.
-pub fn start_menu_apps() -> Vec<(String, String)> {
-    let mut roots = Vec::new();
-    for var in ["APPDATA", "ProgramData"] {
-        if let Some(base) = std::env::var_os(var) { roots.push(PathBuf::from(base).join(r"Microsoft\Windows\Start Menu\Programs")); }
-    }
-    let mut out: Vec<(String, String)> = Vec::new();
-    fn walk(dir: &Path, depth: u8, out: &mut Vec<(String, String)>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
-        for e in rd.flatten() {
-            let p = e.path();
-            let Ok(ft) = e.file_type() else { continue };
-            if ft.is_dir() && depth < 4 { walk(&p, depth + 1, out); continue }
-            let s = p.to_string_lossy().to_string();
-            if ft.is_file() && s.to_ascii_lowercase().ends_with(".lnk") && dock::pinnable(&s) {
-                let name = dock::display_name(&s);
-                if !dock::is_clutter(&name) && !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) { out.push((name, s)); }
-            }
-        }
-    }
-    for r in roots { walk(&r, 0, &mut out); }
-    out.sort_by_key(|(n, _)| n.to_lowercase());
-    out
-}
 
 /// Opens a pinned shortcut or program the way Explorer would (no shell, no arguments).
 pub fn launch(path: &str) -> bool {
