@@ -47,7 +47,7 @@ fn main() {
     if !sys::single_instance() { return }
     // Whatever happens, never leave the PC without a taskbar.
     let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); default_hook(info); }));
+    std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); sys::night_light(0); default_hook(info); }));
 
     let mut settings = store.load_settings();
     if settings.original.is_none() {

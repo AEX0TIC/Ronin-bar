@@ -21,7 +21,8 @@ pub struct Stats {
     pub brightness: Option<u8>,
 }
 
-pub enum Cmd { Volume(f32), Mute(bool), Brightness(u8), Lock, Sleep, SignOut, Restart, ShutDown }
+/// `Night(0)` turns the night light off; any other value is its strength.
+pub enum Cmd { Volume(f32), Mute(bool), Brightness(u8), Night(u8), Lock, Sleep, SignOut, Restart, ShutDown }
 
 /// Starts the thread. `wake` repaints the bar whenever a reading changes, so it never shows stale values.
 pub fn start(wake: eframe::egui::Context) -> (Arc<Mutex<Stats>>, Sender<Cmd>) {
@@ -40,6 +41,9 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
     let mut brightness = wmi.as_ref().and_then(sys::brightness_get);
     let mut last = sys::cpu_times();
     let mut tick = 0u32;
+    // Windows resets the screen colours after sleep, a lock or a new display, so the night light
+    // is put back every few seconds while it is on.
+    let mut night = 0u8;
     loop {
         // Act on commands as they come; refresh the readings once a second.
         match rx.recv_timeout(Duration::from_millis(100)) {
@@ -55,6 +59,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
                     if let Ok(mut s) = stats.lock() { s.brightness = brightness; }
                     for c in rest { act(c, &vol); }
                 },
+                Cmd::Night(n) => { night = n; sys::night_light(n); }
                 other => act(other, &vol),
             }
             if let (Some(e), Ok(mut s)) = (&vol, stats.lock()) { s.volume = sys::volume_get(e); }
@@ -67,6 +72,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
         tick += 1;
         if !tick.is_multiple_of(10) { continue }
         if tick.is_multiple_of(100) || vol.is_none() { vol = sys::volume_endpoint(); }   // headphones plugged in or out
+        if night > 0 && tick.is_multiple_of(50) { sys::night_light(night); }
         if tick.is_multiple_of(30) { brightness = wmi.as_ref().and_then(sys::brightness_get); }   // changed by keys or Windows
         let now = sys::cpu_times();
         let cpu = ronin_core::cpu_percent(last, now);
@@ -88,7 +94,7 @@ fn act(c: Cmd, vol: &Option<sys::Volume>) {
     match c {
         Cmd::Volume(v) => if let Some(e) = vol { sys::volume_set(e, v); sys::mute_set(e, false) },
         Cmd::Mute(m) => if let Some(e) = vol { sys::mute_set(e, m) },
-        Cmd::Brightness(_) => {}
+        Cmd::Brightness(_) | Cmd::Night(_) => {}
         Cmd::Lock => sys::lock(),
         Cmd::Sleep => sys::sleep(),
         Cmd::SignOut => sys::sign_out(),

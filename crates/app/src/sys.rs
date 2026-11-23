@@ -416,7 +416,7 @@ pub fn show_taskbar(state: Option<u32>) {
 // ───── Windows pages ─────
 /// Opens one of a fixed set of Windows settings pages (the "more settings" links in Ronin's popups).
 pub fn open_settings(page: &str) {
-    const PAGES: [&str; 7] = ["sound", "network-wifi", "network-status", "bluetooth", "display", "batterysaver", "powersleep"];
+    const PAGES: [&str; 11] = ["sound", "network-wifi", "network-status", "bluetooth", "display", "batterysaver", "powersleep", "crossdevice", "easeofaccess", "network-mobilehotspot", "nightlight"];
     if !PAGES.contains(&page) { return }
     let uri = HSTRING::from(format!("ms-settings:{page}"));
     unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &uri, None, None, SW_SHOWNORMAL); }
@@ -480,4 +480,91 @@ pub fn today() -> (i32, u32, u32) {
 pub fn local_time() -> (u16, u16, u16, u16, u16) {
     let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
     (t.wDayOfWeek, t.wDay, t.wMonth, t.wHour, t.wMinute)
+}
+
+// ───── quick settings ─────
+/// Ronin's night light: a warmer screen on every display (strength 0 = the plain screen).
+/// Returns false if Windows refused the colour change.
+pub fn night_light(strength: u8) -> bool {
+    use windows::Win32::Graphics::Gdi::{CreateDCW, DeleteDC, EnumDisplayDevicesW, DISPLAY_DEVICEW, DISPLAY_DEVICE_ATTACHED_TO_DESKTOP};
+    use windows::Win32::UI::ColorSystem::SetDeviceGammaRamp;
+    let ramp = ronin_core::night::ramp(strength);
+    let mut ok = false;
+    for i in 0..16u32 {
+        let mut dd = DISPLAY_DEVICEW { cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+        if !unsafe { EnumDisplayDevicesW(PCWSTR::null(), i, &mut dd, 0) }.as_bool() { break }
+        if dd.StateFlags.0 & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP.0 == 0 { continue }
+        unsafe {
+            let dc = CreateDCW(PCWSTR::null(), PCWSTR(dd.DeviceName.as_ptr()), PCWSTR::null(), None);
+            if dc.is_invalid() { continue }
+            ok |= SetDeviceGammaRamp(dc, ramp.as_ptr() as *const c_void).as_bool();
+            let _ = DeleteDC(dc);
+        }
+    }
+    ok
+}
+
+/// How the screens are used, like Windows' "Project" choices.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Screens { PcOnly, Duplicate, Extend, SecondOnly }
+
+pub fn set_screens(s: Screens) -> bool {
+    use windows::Win32::Devices::Display::{SetDisplayConfig, SDC_APPLY, SDC_TOPOLOGY_CLONE, SDC_TOPOLOGY_EXTEND, SDC_TOPOLOGY_EXTERNAL, SDC_TOPOLOGY_INTERNAL};
+    let t = match s { Screens::PcOnly => SDC_TOPOLOGY_INTERNAL, Screens::Duplicate => SDC_TOPOLOGY_CLONE, Screens::Extend => SDC_TOPOLOGY_EXTEND, Screens::SecondOnly => SDC_TOPOLOGY_EXTERNAL };
+    unsafe { SetDisplayConfig(None, None, SDC_APPLY | t) == 0 }
+}
+
+/// Windows' own accessibility tools, run from System32.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tool { Magnifier, Keyboard, Narrator, Captions }
+
+fn tool_file(t: Tool) -> std::path::PathBuf {
+    let mut buf = [0u16; 260];
+    let n = unsafe { windows::Win32::System::SystemInformation::GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    let dir = std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n.min(buf.len())]));
+    dir.join(match t { Tool::Magnifier => "Magnify.exe", Tool::Keyboard => "osk.exe", Tool::Narrator => "Narrator.exe", Tool::Captions => "LiveCaptions.exe" })
+}
+
+pub fn has_tool(t: Tool) -> bool { tool_file(t).is_file() }
+
+/// The tool's window, if it is running (only the ones with a known window).
+fn tool_window(t: Tool) -> Option<HWND> {
+    let class = match t { Tool::Magnifier => w!("MagUIClass"), Tool::Keyboard => w!("OSKMainClass"), _ => return None };
+    unsafe { FindWindowW(class, PCWSTR::null()).ok().filter(|h| !h.is_invalid()) }
+}
+
+pub fn tool_running(t: Tool) -> bool { tool_window(t).is_some() }
+
+/// Starts a tool, or closes it when it is already running.
+pub fn toggle_tool(t: Tool) {
+    if let Some(h) = tool_window(t) { close_window(h); return }
+    let f = tool_file(t);
+    if !f.is_file() { return }
+    unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &HSTRING::from(f.as_os_str()), None, None, SW_SHOWNORMAL); }
+}
+
+pub fn sticky_keys() -> bool {
+    use windows::Win32::UI::Accessibility::{SKF_STICKYKEYSON, STICKYKEYS};
+    let mut sk = STICKYKEYS { cbSize: std::mem::size_of::<STICKYKEYS>() as u32, ..Default::default() };
+    unsafe { let _ = SystemParametersInfoW(SPI_GETSTICKYKEYS, sk.cbSize, Some(&mut sk as *mut STICKYKEYS as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0)); }
+    sk.dwFlags.contains(SKF_STICKYKEYSON)
+}
+
+pub fn set_sticky_keys(on: bool) {
+    use windows::Win32::UI::Accessibility::{SKF_STICKYKEYSON, STICKYKEYS, STICKYKEYS_FLAGS};
+    let mut sk = STICKYKEYS { cbSize: std::mem::size_of::<STICKYKEYS>() as u32, ..Default::default() };
+    unsafe {
+        let _ = SystemParametersInfoW(SPI_GETSTICKYKEYS, sk.cbSize, Some(&mut sk as *mut STICKYKEYS as *mut c_void), SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0));
+        sk.dwFlags = if on { STICKYKEYS_FLAGS(sk.dwFlags.0 | SKF_STICKYKEYSON.0) } else { STICKYKEYS_FLAGS(sk.dwFlags.0 & !SKF_STICKYKEYSON.0) };
+        let _ = SystemParametersInfoW(SPI_SETSTICKYKEYS, sk.cbSize, Some(&mut sk as *mut STICKYKEYS as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+}
+
+/// Windows features that have no public switch: Ronin opens Windows' own screen for them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Uri { Cast, Snip }
+
+pub fn open_uri(u: Uri) {
+    let uri = match u { Uri::Cast => w!("ms-settings-connectabledevices:devicediscovery"), Uri::Snip => w!("ms-screenclip:") };
+    unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), uri, None, None, SW_SHOWNORMAL); }
 }

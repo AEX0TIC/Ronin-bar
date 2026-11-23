@@ -31,6 +31,15 @@ pub struct NetState {
     pub error: Option<String>,
     pub wifi_on: Option<bool>,
     pub bluetooth_on: Option<bool>,
+    /// Mobile hotspot: on, off, or None when this PC cannot share its connection right now.
+    pub hotspot_on: Option<bool>,
+}
+
+impl NetState {
+    /// Airplane mode: every radio this PC has is off.
+    pub fn airplane(&self) -> bool {
+        (self.wifi_on.is_some() || self.bluetooth_on.is_some()) && self.wifi_on != Some(true) && self.bluetooth_on != Some(true)
+    }
 }
 
 pub enum NetCmd {
@@ -40,6 +49,9 @@ pub enum NetCmd {
     Connect { ssid: String, password: String },
     Disconnect,
     Radio { bluetooth: bool, on: bool },
+    /// Every radio off, or back on.
+    Airplane(bool),
+    Hotspot(bool),
 }
 
 /// Starts the thread. `wake` repaints the bar as soon as anything changes.
@@ -170,6 +182,32 @@ fn set_radio(bluetooth: bool, on: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// Mobile hotspot for the current internet connection: on, off, or None when it cannot be shared.
+fn hotspot() -> Option<bool> {
+    use windows::Networking::Connectivity::NetworkInformation;
+    use windows::Networking::NetworkOperators::{NetworkOperatorTetheringManager, TetheringOperationalState};
+    let profile = NetworkInformation::GetInternetConnectionProfile().ok()?;
+    let m = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile).ok()?;
+    match m.TetheringOperationalState().ok()? {
+        TetheringOperationalState::On => Some(true),
+        TetheringOperationalState::Off | TetheringOperationalState::InTransition => Some(false),
+        _ => None,
+    }
+}
+
+fn set_hotspot(on: bool) -> Result<(), String> {
+    use windows::Networking::Connectivity::NetworkInformation;
+    use windows::Networking::NetworkOperators::{NetworkOperatorTetheringManager, TetheringOperationStatus};
+    let profile = NetworkInformation::GetInternetConnectionProfile().map_err(|_| "No internet connection to share".to_string())?;
+    let m = NetworkOperatorTetheringManager::CreateFromConnectionProfile(&profile).map_err(|e| e.message())?;
+    let op = if on { m.StartTetheringAsync() } else { m.StopTetheringAsync() };
+    let r = op.and_then(|a| a.join()).map_err(|e| e.message())?;
+    match r.Status() {
+        Ok(TetheringOperationStatus::Success) => Ok(()),
+        _ => Err(r.AdditionalErrorMessage().map(|m| m.to_string()).ok().filter(|m| !m.is_empty()).unwrap_or_else(|| "Windows refused".to_string())),
+    }
+}
+
 fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Context) {
     crate::sys::com_init_mta();
     let wlan = Wlan::open();
@@ -179,7 +217,9 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
         let nets = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
         set(&|s| s.networks = nets.clone());
     };
-    let radios_now = || { let (w, b) = radios(); set(&|s| { s.wifi_on = w; s.bluetooth_on = b; }); };
+    let radios_now = || { let (w, b) = radios(); let hs = hotspot(); set(&|s| { s.wifi_on = w; s.bluetooth_on = b; s.hotspot_on = hs; }); };
+    // Which radios were on before airplane mode, to turn the same ones back on.
+    let mut before_airplane = (true, false);
     list(&wlan);
     radios_now();
     let mut last_scan = Instant::now() - Duration::from_secs(60);
@@ -196,7 +236,7 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
         };
         let soon = |ms: &[u64]| ms.iter().map(|m| Instant::now() + Duration::from_millis(*m)).collect::<Vec<_>>();
         match cmd {
-            Some(NetCmd::Refresh) => { list(&wlan); radios_now(); }
+            Some(NetCmd::Refresh) => { set(&|s| s.error = None); list(&wlan); radios_now(); }
             Some(NetCmd::Scan) => {
                 // Windows allows a fresh scan every few seconds.
                 if last_scan.elapsed() > Duration::from_secs(4) {
@@ -229,6 +269,24 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
                 set(&|s| s.error = r.clone().err().map(|e| format!("Could not switch {}: {e}", if bluetooth { "Bluetooth" } else { "Wi-Fi" })));
                 radios_now();
                 later.extend(soon(&[800, 2500]));
+            }
+            Some(NetCmd::Airplane(on)) => {
+                let (w, b) = state.lock().map(|s| (s.wifi_on, s.bluetooth_on)).unwrap_or((None, None));
+                let r = if on {
+                    before_airplane = (w == Some(true), b == Some(true));
+                    set_radio(false, false).and(if b.is_some() { set_radio(true, false) } else { Ok(()) })
+                } else {
+                    let (w0, b0) = before_airplane;
+                    set_radio(false, w0 || !b0).and(if b0 { set_radio(true, true) } else { Ok(()) })
+                };
+                set(&|s| s.error = r.clone().err().map(|e| format!("Could not switch airplane mode: {e}")));
+                radios_now();
+                later.extend(soon(&[800, 2500]));
+            }
+            Some(NetCmd::Hotspot(on)) => {
+                let r = set_hotspot(on);
+                set(&|s| s.error = r.clone().err().map(|e| format!("Mobile hotspot: {e}")));
+                radios_now();
             }
             None => {}
         }

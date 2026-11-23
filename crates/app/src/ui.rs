@@ -26,7 +26,19 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Launcher, Calendar, Sound, Power, Battery, Network }
+enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Quick }
+
+/// The pages of the quick settings popup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum QuickView { Main, Night, Access, Project }
+
+/// What a quick settings tile does when clicked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum QAct { Wifi, WifiList, Bluetooth, BluetoothDevices, Airplane, Night, NightPage, Hotspot, HotspotSettings, Access, Project, Cast, Captions, Nearby, Battery, Snip }
+
+/// Width of a quick settings tile, and the gap between tiles.
+const TILE_W: f32 = 108.0;
+const TILE_GAP: f32 = 14.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm { Sleep, SignOut, Restart, ShutDown, Uninstall }
@@ -81,6 +93,12 @@ pub struct Bar {
     /// The popup window is made once and then only shown and hidden, so popups open instantly.
     popup_live: bool,
     popup_size: (f32, f32),
+    /// Quick settings: the page shown, whether the open popup was reached from it (it then has a
+    /// back button), a short message from the last action, and sticky keys as last read.
+    quick_view: QuickView,
+    from_quick: bool,
+    quick_note: Option<String>,
+    sticky: bool,
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -104,7 +122,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0), Popup::Network => (360.0, 470.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 490.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 560.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -145,12 +163,13 @@ impl Bar {
         let progress = Arc::new(Mutex::new(download::Progress::default()));
         let (w, h, scale) = sys::primary_screen();
         download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone());
+        if settings.night_light { let _ = tx.send(worker::Cmd::Night(settings.night_strength)); }
         if catalog.lock().map(|l| l.len()).unwrap_or(0) < COLLECTIONS.len() * PER_COLLECTION {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -172,7 +191,22 @@ impl Bar {
         self.popup_x = x;
         self.popup_at = Instant::now();
         if p == Popup::Calendar { let (y, m, _) = sys::today(); self.cal = (y, m); }
-        if p == Popup::Network { let _ = self.net_tx.send(net::NetCmd::Refresh); self.net_scan_at = Instant::now() - Duration::from_secs(60); }
+        self.from_quick = false;
+        self.opened(p);
+    }
+
+    /// Shows another popup in the same window (from a quick settings tile); it gets a back button.
+    fn go(&mut self, p: Popup) {
+        self.popup = Some(p);
+        self.from_quick = true;
+        self.opened(p);
+    }
+
+    /// Fresh data for a popup that has just appeared.
+    fn opened(&mut self, p: Popup) {
+        if matches!(p, Popup::Network | Popup::Quick) { let _ = self.net_tx.send(net::NetCmd::Refresh); }
+        if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
+        if p == Popup::Quick { self.quick_view = QuickView::Main; self.quick_note = None; self.sticky = sys::sticky_keys(); }
         if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
     }
 
@@ -533,8 +567,9 @@ impl Bar {
                     let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
                     if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
                 }
-                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, s.online, fg, muted));
-                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
+                // Network: Ronin's quick settings (Wi-Fi, Bluetooth, night light and the rest).
+                let r = self.chip(ui, None, matches!(self.popup, Some(Popup::Quick | Popup::Network)), |p, g| glyph::network(p, g, s.online, fg, muted));
+                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Quick, r.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
                 if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
@@ -756,6 +791,262 @@ impl Bar {
         resp
     }
 
+    /// A small "back" arrow at the start of a popup's title row.
+    fn back_button(&self, ui: &mut egui::Ui) -> bool {
+        let t = self.theme();
+        let (r, resp) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+        if resp.hovered() { ui.painter().rect_filled(r, 7.0, c(t.surface)); }
+        glyph::quick(ui.painter(), r.shrink(5.0), glyph::Quick::Back, c(t.fg));
+        resp.clicked()
+    }
+
+    /// One quick settings tile: a rounded button (lit in the accent colour when on) with its name
+    /// underneath. A tile with a page behind it shows an arrow; when it is also a switch, the arrow
+    /// is a separate part of the tile. Returns clicks on the tile and on its arrow.
+    fn qtile(&self, ui: &mut egui::Ui, g: glyph::Quick, label: &str, on: Option<bool>, more: bool) -> (bool, bool) {
+        let t = self.theme();
+        let (rect, _) = ui.allocate_exact_size(vec2(TILE_W, 76.0), Sense::hover());
+        let bx = Rect::from_min_size(rect.min, vec2(TILE_W, 50.0));
+        let lit = on == Some(true);
+        let split = more && on.is_some();
+        let cut = bx.right() - 34.0;
+        let main_r = if split { Rect::from_min_max(bx.min, pos2(cut, bx.bottom())) } else { bx };
+        let id = ui.scope_id().with("ronin-tile").with(label);
+        let main = ui.interact(main_r, id.with("main"), Sense::click());
+        let arrow = split.then(|| ui.interact(Rect::from_min_max(pos2(cut, bx.top()), bx.max), id.with("more"), Sense::click()));
+        let p = ui.painter();
+        let base = if lit { c(t.accent) } else { c(t.surface) };
+        p.rect_filled(bx, 10.0, base);
+        let glow = Color32::from_white_alpha(if t.dark { 18 } else { 40 });
+        if main.hovered() { p.rect_filled(main_r, 10.0, glow); }
+        if let Some(a) = &arrow { if a.hovered() { p.rect_filled(Rect::from_min_max(pos2(cut, bx.top()), bx.max), 10.0, glow); } }
+        let ink = if lit { c(t.bg) } else { c(t.fg) };
+        if split {
+            p.line_segment([pos2(cut, bx.top() + 9.0), pos2(cut, bx.bottom() - 9.0)], Stroke::new(1.0, if lit { c(t.bg).gamma_multiply(0.5) } else { c(t.bg) }));
+            glyph::quick(p, Rect::from_center_size(main_r.center(), Vec2::splat(20.0)), g, ink);
+            glyph::quick(p, Rect::from_center_size(pos2(cut + 17.0, bx.center().y), Vec2::splat(16.0)), glyph::Quick::More, ink);
+        } else if more {
+            glyph::quick(p, Rect::from_center_size(bx.center() - vec2(8.0, 0.0), Vec2::splat(20.0)), g, ink);
+            glyph::quick(p, Rect::from_center_size(pos2(bx.right() - 18.0, bx.center().y), Vec2::splat(14.0)), glyph::Quick::More, ink);
+        } else {
+            glyph::quick(p, Rect::from_center_size(bx.center(), Vec2::splat(20.0)), g, ink);
+        }
+        let mut name: String = label.chars().take(17).collect();
+        if label.chars().count() > 17 { name.push('…'); }
+        p.text(pos2(bx.center().x, bx.bottom() + 14.0), egui::Align2::CENTER_CENTER, name, FontId::proportional(12.0), c(t.fg));
+        let main_click = main.on_hover_text(label).clicked();
+        (main_click, arrow.map(|a| a.clicked()).unwrap_or(main_click && more && !split))
+    }
+
+    /// Ronin's quick settings: Wi-Fi, Bluetooth, airplane mode, night light and more, then
+    /// brightness and volume, all without leaving the bar.
+    fn pop_quick(&mut self, ui: &mut egui::Ui) {
+        match self.quick_view {
+            QuickView::Main => self.quick_main(ui),
+            QuickView::Night => self.quick_night(ui),
+            QuickView::Access => self.quick_access(ui),
+            QuickView::Project => self.quick_project(ui),
+        }
+    }
+
+    fn quick_main(&mut self, ui: &mut egui::Ui) {
+        use glyph::Quick as Q;
+        let t = self.theme();
+        let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        let wifi_name = st.networks.iter().find(|n| n.connected).map(|n| n.ssid.clone())
+            .unwrap_or_else(|| if st.wifi_on == Some(true) { "Not connected".into() } else { "Wi-Fi".into() });
+        let radios_known = st.wifi_on.is_some() || st.bluetooth_on.is_some();
+        // (icon, name, on/off if it is a switch, has a page, click, arrow click)
+        let mut tiles: Vec<(Q, String, Option<bool>, bool, QAct, QAct)> = vec![
+            (Q::Wifi, wifi_name, Some(st.wifi_on.unwrap_or(false)), true, QAct::Wifi, QAct::WifiList),
+            (Q::Bluetooth, "Bluetooth".into(), st.bluetooth_on, true, QAct::Bluetooth, QAct::BluetoothDevices),
+            (Q::Airplane, "Airplane mode".into(), radios_known.then(|| st.airplane()), false, QAct::Airplane, QAct::Airplane),
+            (Q::Night, "Night light".into(), Some(self.settings.night_light), true, QAct::Night, QAct::NightPage),
+            (Q::Hotspot, "Mobile hotspot".into(), st.hotspot_on, st.hotspot_on.is_some(), if st.hotspot_on.is_some() { QAct::Hotspot } else { QAct::HotspotSettings }, QAct::HotspotSettings),
+            (Q::Access, "Accessibility".into(), None, true, QAct::Access, QAct::Access),
+            (Q::Project, "Project".into(), None, true, QAct::Project, QAct::Project),
+            (Q::Cast, "Cast".into(), None, false, QAct::Cast, QAct::Cast),
+        ];
+        if sys::has_tool(sys::Tool::Captions) { tiles.push((Q::Captions, "Live captions".into(), None, false, QAct::Captions, QAct::Captions)); }
+        tiles.push((Q::Share, "Nearby sharing".into(), None, false, QAct::Nearby, QAct::Nearby));
+        tiles.push((Q::Battery, if s.battery.is_some() { "Power & battery".into() } else { "Power".into() }, None, true, QAct::Battery, QAct::Battery));
+        tiles.push((Q::Snip, "Screen snip".into(), None, false, QAct::Snip, QAct::Snip));
+
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
+            ui.label(RichText::new("Quick settings").strong().size(15.0));
+        });
+        ui.add_space(8.0);
+        let mut act: Option<QAct> = None;
+        for row in tiles.chunks(3) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = TILE_GAP;
+                for (g, name, on, more, a, b) in row {
+                    let (main, arrow) = self.qtile(ui, *g, name, *on, *more);
+                    if arrow && *more { act = Some(*b) } else if main { act = Some(*a) }
+                }
+            });
+        }
+        if let Some(e) = st.error.as_ref().or(self.quick_note.as_ref()) { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(6.0);
+        let w = ui.available_width();
+        ui.spacing_mut().slider_width = w - 40.0;
+        if let Some(br) = s.brightness {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+                glyph::quick(ui.painter(), r.shrink(3.0), Q::Sun, c(t.fg));
+                self.brightness_slider(ui, br);
+            });
+            ui.add_space(4.0);
+        }
+        if let Some((v, m)) = s.volume {
+            ui.horizontal(|ui| {
+                let (r, mute) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                if mute.hovered() { ui.painter().rect_filled(r, 7.0, c(t.surface)); }
+                glyph::volume(ui.painter(), r.shrink(3.0), v, m, c(if m { t.muted } else { t.fg }));
+                if mute.on_hover_text(if m { "Sound on" } else { "Mute" }).clicked() { self.set_mute(!m); }
+                self.volume_slider(ui, v);
+            });
+        }
+        // Battery on the left, Ronin settings and power on the right.
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                if let Some((b, charging)) = s.battery {
+                    let (r, resp) = ui.allocate_exact_size(vec2(80.0, 28.0), Sense::click());
+                    if resp.hovered() { ui.painter().rect_filled(r, 7.0, c(t.surface)); }
+                    glyph::battery(ui.painter(), Rect::from_center_size(pos2(r.left() + 16.0, r.center().y), Vec2::splat(22.0)), b, charging, c(t.fg), c(t.accent));
+                    ui.painter().text(pos2(r.left() + 32.0, r.center().y), egui::Align2::LEFT_CENTER, format!("{b}%"), FontId::proportional(13.0), c(t.fg));
+                    if resp.clicked() { act = Some(QAct::Battery); }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (r, pw) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+                    if pw.hovered() { ui.painter().rect_filled(r, 7.0, c(t.surface)); }
+                    glyph::draw(ui.painter(), r.shrink(5.0), Glyph::Power, c(t.accent));
+                    if pw.on_hover_text("Power").clicked() { self.confirm = None; self.go(Popup::Power); }
+                    let (r, gear) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
+                    if gear.hovered() { ui.painter().rect_filled(r, 7.0, c(t.surface)); }
+                    glyph::draw(ui.painter(), r.shrink(5.0), Glyph::Gear, c(t.fg));
+                    if gear.on_hover_text("Ronin settings").clicked() { self.open(Tab::Settings); }
+                });
+            });
+        });
+        if let Some(a) = act { self.quick_act(a, &st); }
+    }
+
+    fn quick_act(&mut self, a: QAct, st: &net::NetState) {
+        self.quick_note = None;
+        match a {
+            QAct::Wifi => self.radio(false, st.wifi_on != Some(true)),
+            QAct::WifiList => { self.joining = None; self.go(Popup::Network); }
+            QAct::Bluetooth => self.radio(true, st.bluetooth_on != Some(true)),
+            QAct::BluetoothDevices => sys::open_settings("bluetooth"),
+            QAct::Airplane => {
+                let on = !st.airplane();
+                if let Ok(mut s) = self.net.lock() {
+                    if on { s.wifi_on = s.wifi_on.map(|_| false); s.bluetooth_on = s.bluetooth_on.map(|_| false); } else { s.wifi_on = Some(true); }
+                }
+                let _ = self.net_tx.send(net::NetCmd::Airplane(on));
+            }
+            QAct::Night => self.set_night(!self.settings.night_light),
+            QAct::NightPage => self.quick_view = QuickView::Night,
+            QAct::Hotspot => {
+                let on = st.hotspot_on != Some(true);
+                if let Ok(mut s) = self.net.lock() { s.hotspot_on = Some(on); }
+                let _ = self.net_tx.send(net::NetCmd::Hotspot(on));
+            }
+            QAct::HotspotSettings => sys::open_settings("network-mobilehotspot"),
+            QAct::Access => { self.sticky = sys::sticky_keys(); self.quick_view = QuickView::Access; }
+            QAct::Project => self.quick_view = QuickView::Project,
+            QAct::Cast => { sys::open_uri(sys::Uri::Cast); self.close_popup(); }
+            QAct::Captions => { sys::toggle_tool(sys::Tool::Captions); self.close_popup(); }
+            QAct::Nearby => sys::open_settings("crossdevice"),
+            QAct::Battery => self.go(Popup::Battery),
+            QAct::Snip => { self.close_popup(); sys::open_uri(sys::Uri::Snip); }
+        }
+    }
+
+    fn set_night(&mut self, on: bool) {
+        self.settings.night_light = on;
+        self.save();
+        let _ = self.tx.send(worker::Cmd::Night(if on { self.settings.night_strength } else { 0 }));
+    }
+
+    /// The title row of a quick settings page, with a back arrow to the tiles.
+    fn quick_header(&mut self, ui: &mut egui::Ui, title: &str) {
+        let mut back = false;
+        ui.horizontal(|ui| { back = self.back_button(ui); ui.label(RichText::new(title).strong().size(15.0)); });
+        if back { self.quick_view = QuickView::Main; self.quick_note = None; }
+        ui.add_space(10.0);
+    }
+
+    /// A row with a name on the left and a switch on the right.
+    fn switch_row(&self, ui: &mut egui::Ui, label: &str, on: bool) -> bool {
+        let mut clicked = false;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(label).size(14.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { clicked = self.switch(ui, on).clicked(); });
+        });
+        ui.add_space(6.0);
+        clicked
+    }
+
+    fn quick_night(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        self.quick_header(ui, "Night light");
+        ui.label(RichText::new("Warmer colours that are easier on the eyes at night.").color(c(t.muted)));
+        ui.add_space(10.0);
+        if self.switch_row(ui, "Night light", self.settings.night_light) { self.set_night(!self.settings.night_light); }
+        ui.label(RichText::new("Strength").size(14.0));
+        let mut v = f32::from(self.settings.night_strength);
+        ui.spacing_mut().slider_width = ui.available_width();
+        let r = ui.add(egui::Slider::new(&mut v, 10.0..=100.0).show_value(false));
+        if r.changed() {
+            self.settings.night_strength = v.round() as u8;
+            if self.settings.night_light { let _ = self.tx.send(worker::Cmd::Night(self.settings.night_strength)); }
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) { self.save(); }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("cooler").color(c(t.muted)).size(11.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { ui.label(RichText::new("warmer").color(c(t.muted)).size(11.0)); });
+        });
+    }
+
+    fn quick_access(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        self.quick_header(ui, "Accessibility");
+        if sys::has_tool(sys::Tool::Magnifier) && self.switch_row(ui, "Magnifier", sys::tool_running(sys::Tool::Magnifier)) { sys::toggle_tool(sys::Tool::Magnifier); }
+        if sys::has_tool(sys::Tool::Keyboard) && self.switch_row(ui, "On-screen keyboard", sys::tool_running(sys::Tool::Keyboard)) { sys::toggle_tool(sys::Tool::Keyboard); }
+        if self.switch_row(ui, "Sticky keys", self.sticky) { sys::set_sticky_keys(!self.sticky); self.sticky = sys::sticky_keys(); }
+        for (tool, name) in [(sys::Tool::Narrator, "Narrator"), (sys::Tool::Captions, "Live captions")] {
+            if !sys::has_tool(tool) { continue }
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(name).size(14.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| { if ui.small_button("start").clicked() { sys::toggle_tool(tool); } });
+            });
+            ui.add_space(6.0);
+        }
+        ui.label(RichText::new("Narrator stops with Ctrl + Windows + Enter.").color(c(t.muted)).size(11.0));
+        self.settings_link(ui, "Accessibility settings", "easeofaccess");
+    }
+
+    fn quick_project(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        self.quick_header(ui, "Project");
+        ui.label(RichText::new("How to use a second screen.").color(c(t.muted)));
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        for (label, mode) in [("PC screen only", sys::Screens::PcOnly), ("Duplicate", sys::Screens::Duplicate), ("Extend", sys::Screens::Extend), ("Second screen only", sys::Screens::SecondOnly)] {
+            if ui.add_sized([w, 38.0], egui::Button::new(RichText::new(label).size(14.0))).clicked() {
+                self.quick_note = Some(if sys::set_screens(mode) { format!("{label}: done") } else { "Windows could not switch. Is a second screen connected?".into() });
+            }
+        }
+        if let Some(n) = &self.quick_note { ui.add_space(6.0); ui.label(RichText::new(n).color(c(t.accent)).size(12.0)); }
+    }
+
     /// Switches Wi-Fi or Bluetooth, showing the new state at once.
     fn radio(&mut self, bluetooth: bool, on: bool) {
         if let Ok(mut s) = self.net.lock() { if bluetooth { s.bluetooth_on = Some(on) } else { s.wifi_on = Some(on) } }
@@ -770,7 +1061,9 @@ impl Bar {
         }
         let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
         let online = self.stats.lock().map(|s| s.online).unwrap_or(false);
+        let mut back = false;
         ui.horizontal(|ui| {
+            if self.from_quick { back = self.back_button(ui); }
             ui.label(RichText::new("Wi-Fi").strong().size(15.0));
             if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -779,6 +1072,7 @@ impl Bar {
                 }
             });
         });
+        if back { self.popup = Some(Popup::Quick); return }
         if st.no_wifi {
             ui.label(RichText::new(if online { "No Wi-Fi here; connected by cable." } else { "No Wi-Fi adapter, and not connected." }).color(c(t.muted)));
         }
@@ -858,6 +1152,12 @@ impl Bar {
     fn pop_battery(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        if self.from_quick {
+            let mut back = false;
+            ui.horizontal(|ui| { back = self.back_button(ui); ui.label(RichText::new("Power & battery").strong().size(15.0)); });
+            if back { self.popup = Some(Popup::Quick); return }
+            ui.add_space(6.0);
+        }
         if let Some((b, charging)) = s.battery {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(44.0, 30.0), Sense::hover());
@@ -1204,7 +1504,7 @@ impl Bar {
             };
             egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui) }
+                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Quick => self.pop_quick(ui) }
             });
             // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
             ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
@@ -1221,6 +1521,7 @@ impl Bar {
             sys::release_top(self.bar_px);
         }
         self.show_taskbar();
+        if self.settings.night_light { sys::night_light(0); }
     }
 
     /// Ends Ronin Bar right away (also from the panel, which is a window of its own): gives back the

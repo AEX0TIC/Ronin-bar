@@ -129,3 +129,83 @@ pub fn battery(p: &Painter, r: Rect, pct: u8, charging: bool, col: Color32, low:
         p.add(Shape::closed_line(bolt, Stroke::new(1.0 * u, Color32::BLACK)));
     }
 }
+
+/// Icons for the quick settings tiles.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Quick { Wifi, Bluetooth, Airplane, Night, Hotspot, Access, Project, Cast, Captions, Share, Battery, Snip, Sun, More, Back }
+
+pub fn quick(p: &Painter, r: Rect, q: Quick, col: Color32) {
+    let c = r.center();
+    let u = r.width().min(r.height()) / 16.0;
+    let s = Stroke::new(1.3 * u.max(0.9), col);
+    let pt = |x: f32, y: f32| c + vec2(x, y) * u;
+    let poly = |pts: &[(f32, f32)], closed: bool| {
+        let v: Vec<Pos2> = pts.iter().map(|&(x, y)| pt(x, y)).collect();
+        if closed { p.add(Shape::closed_line(v, s)); } else { p.add(Shape::line(v, s)); }
+    };
+    match q {
+        Quick::Wifi => network(p, r, true, col, col),
+        Quick::Bluetooth => poly(&[(-4.0, -3.5), (4.0, 3.5), (0.0, 7.0), (0.0, -7.0), (4.0, -3.5), (-4.0, 3.5)], false),
+        Quick::Airplane => {
+            poly(&[(0.0, -7.0), (0.0, 6.5)], false);
+            poly(&[(-7.0, 1.5), (0.0, -2.5), (7.0, 1.5)], false);
+            poly(&[(-3.0, 7.0), (0.0, 5.0), (3.0, 7.0)], false);
+        }
+        Quick::Night => {
+            // A crescent: a circle with a bite taken out.
+            arc(p, pt(0.0, 0.0), 6.0 * u, 0.9, 0.9 + TAU - 1.8, s);
+            arc(p, pt(3.2, -2.0), 4.6 * u, PI * 0.95, PI * 1.85, s);
+        }
+        Quick::Hotspot => {
+            p.circle_filled(pt(0.0, 0.0), 1.4 * u, col);
+            for rad in [3.6f32, 6.6] {
+                arc(p, pt(0.0, 0.0), rad * u, -0.7, 0.7, s);
+                arc(p, pt(0.0, 0.0), rad * u, PI - 0.7, PI + 0.7, s);
+            }
+        }
+        Quick::Access => {
+            p.circle_filled(pt(0.0, -5.6), 1.5 * u, col);
+            poly(&[(-6.0, -2.6), (0.0, -1.4), (6.0, -2.6)], false);
+            poly(&[(0.0, -1.4), (0.0, 2.4)], false);
+            poly(&[(-3.2, 7.0), (0.0, 2.4), (3.2, 7.0)], false);
+        }
+        Quick::Project => {
+            p.rect_stroke(Rect::from_min_max(pt(-7.0, -5.5), pt(3.0, 2.0)), 1.2 * u, s, eframe::egui::StrokeKind::Middle);
+            p.rect_stroke(Rect::from_min_max(pt(-2.0, -1.5), pt(7.5, 5.5)), 1.2 * u, s, eframe::egui::StrokeKind::Middle);
+        }
+        Quick::Cast => {
+            poly(&[(-7.0, -1.5), (-7.0, -5.5), (7.0, -5.5), (7.0, 5.5), (1.5, 5.5)], false);
+            arc(p, pt(-7.0, 5.5), 3.4 * u, 0.0, PI / 2.0, s);
+            arc(p, pt(-7.0, 5.5), 6.4 * u, 0.0, PI / 2.0, s);
+            p.circle_filled(pt(-6.4, 4.9), 1.0 * u, col);
+        }
+        Quick::Captions => {
+            p.rect_stroke(Rect::from_min_max(pt(-7.0, -5.0), pt(7.0, 5.0)), 1.6 * u, s, eframe::egui::StrokeKind::Middle);
+            poly(&[(-4.5, 0.5), (-0.5, 0.5)], false);
+            poly(&[(1.5, 0.5), (4.5, 0.5)], false);
+            poly(&[(-4.5, 2.8), (4.5, 2.8)], false);
+        }
+        Quick::Share => {
+            for (x, y) in [(4.5f32, -5.0f32), (-4.5, 0.0), (4.5, 5.0)] { p.circle_stroke(pt(x, y), 1.8 * u, s); }
+            poly(&[(2.9, -4.1), (-2.9, -0.9)], false);
+            poly(&[(-2.9, 0.9), (2.9, 4.1)], false);
+        }
+        Quick::Battery => battery(p, r, 70, false, col, col),
+        Quick::Snip => {
+            p.circle_stroke(pt(-4.0, 4.5), 2.2 * u, s);
+            p.circle_stroke(pt(4.0, 4.5), 2.2 * u, s);
+            poly(&[(-2.6, 2.8), (4.5, -7.0)], false);
+            poly(&[(2.6, 2.8), (-4.5, -7.0)], false);
+        }
+        Quick::Sun => {
+            p.circle_stroke(c, 3.2 * u, s);
+            for i in 0..8 {
+                let a = i as f32 * TAU / 8.0;
+                let d = vec2(a.cos(), a.sin());
+                p.line_segment([c + d * 5.2 * u, c + d * 7.0 * u], s);
+            }
+        }
+        Quick::More => poly(&[(-2.0, -4.5), (2.5, 0.0), (-2.0, 4.5)], false),
+        Quick::Back => poly(&[(2.0, -4.5), (-2.5, 0.0), (2.0, 4.5)], false),
+    }
+}
