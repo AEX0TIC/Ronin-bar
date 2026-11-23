@@ -131,6 +131,85 @@ pub fn battery() -> Option<(u8, bool)> {
     Some((s.BatteryLifePercent, s.ACLineStatus == 1))
 }
 
+/// Minutes of battery left (Windows' estimate), and whether battery saver is on.
+pub fn battery_detail() -> (Option<u32>, bool) {
+    let mut s = SYSTEM_POWER_STATUS::default();
+    if unsafe { GetSystemPowerStatus(&mut s) }.is_err() { return (None, false) }
+    let mins = (s.BatteryLifeTime != u32::MAX && s.ACLineStatus != 1).then_some(s.BatteryLifeTime / 60);
+    (mins, s.SystemStatusFlag == 1)
+}
+
+// ───── screen brightness (built-in screens, through Windows' WMI service) ─────
+use windows::core::BSTR;
+use windows::Win32::System::Variant::{VariantClear, VariantToString, VariantToUInt32, VARENUM, VARIANT, VT_I4, VT_UI1};
+use windows::Win32::System::Wmi::{IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator, WBEM_FLAG_FORWARD_ONLY, WBEM_FLAG_RETURN_IMMEDIATELY, WBEM_GENERIC_FLAG_TYPE, WBEM_INFINITE};
+
+/// A connection to WMI's ROOT\WMI namespace (call on the thread that initialised COM).
+pub fn wmi() -> Option<IWbemServices> {
+    unsafe {
+        let loc: IWbemLocator = CoCreateInstance(&WbemLocator, None, windows::Win32::System::Com::CLSCTX_INPROC_SERVER).ok()?;
+        let svc = loc.ConnectServer(&BSTR::from("ROOT\\WMI"), &BSTR::new(), &BSTR::new(), &BSTR::new(), 0, &BSTR::new(), None).ok()?;
+        let _ = windows::Win32::System::Com::CoSetProxyBlanket(&svc, windows::Win32::System::Rpc::RPC_C_AUTHN_WINNT, windows::Win32::System::Rpc::RPC_C_AUTHZ_NONE,
+            PCWSTR::null(), windows::Win32::System::Com::RPC_C_AUTHN_LEVEL_CALL, windows::Win32::System::Com::RPC_C_IMP_LEVEL_IMPERSONATE, None, windows::Win32::System::Com::EOAC_NONE);
+        Some(svc)
+    }
+}
+
+fn wmi_first(svc: &IWbemServices, query: &str) -> Option<IWbemClassObject> {
+    unsafe {
+        let e = svc.ExecQuery(&BSTR::from("WQL"), &BSTR::from(query), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY, None).ok()?;
+        let mut objs = [None];
+        let mut n = 0u32;
+        e.Next(WBEM_INFINITE, &mut objs, &mut n).ok().ok()?;
+        objs[0].take()
+    }
+}
+
+fn variant(vt: VARENUM, value: u32) -> VARIANT {
+    let mut v = VARIANT::default();
+    unsafe {
+        let inner = &mut *v.Anonymous.Anonymous;
+        inner.vt = vt;
+        inner.Anonymous.ulVal = value;
+    }
+    v
+}
+
+/// The built-in screen's brightness in percent; None on PCs whose screen Windows cannot dim
+/// (most desktop monitors).
+pub fn brightness_get(svc: &IWbemServices) -> Option<u8> {
+    let o = wmi_first(svc, "SELECT CurrentBrightness FROM WmiMonitorBrightness WHERE Active=TRUE")?;
+    unsafe {
+        let mut v = VARIANT::default();
+        o.Get(w!("CurrentBrightness"), 0, &mut v, None, None).ok()?;
+        let r = VariantToUInt32(&v).ok();
+        let _ = VariantClear(&mut v);
+        r.map(|x| x.min(100) as u8)
+    }
+}
+
+pub fn brightness_set(svc: &IWbemServices, pct: u8) {
+    let Some(o) = wmi_first(svc, "SELECT * FROM WmiMonitorBrightnessMethods WHERE Active=TRUE") else { return };
+    unsafe {
+        let mut p = VARIANT::default();
+        if o.Get(w!("__PATH"), 0, &mut p, None, None).is_err() { return }
+        let mut buf = [0u16; 512];
+        let ok = VariantToString(&p, &mut buf).is_ok();
+        let _ = VariantClear(&mut p);
+        if !ok { return }
+        let path = String::from_utf16_lossy(&buf[..buf.iter().position(|&c| c == 0).unwrap_or(buf.len())]);
+        let mut class = None;
+        if svc.GetObject(&BSTR::from("WmiMonitorBrightnessMethods"), WBEM_GENERIC_FLAG_TYPE(0), None, Some(&mut class), None).is_err() { return }
+        let Some(class) = class else { return };
+        let (mut inp, mut out) = (None, None);
+        if class.GetMethod(w!("WmiSetBrightness"), 0, &mut inp, &mut out).is_err() { return }
+        let Some(inst) = inp.and_then(|i| i.SpawnInstance(0).ok()) else { return };
+        let _ = inst.Put(w!("Timeout"), 0, &variant(VT_I4, 1), 0);
+        let _ = inst.Put(w!("Brightness"), 0, &variant(VT_UI1, u32::from(pct.min(100))), 0);
+        let _ = svc.ExecMethod(&BSTR::from(path), &BSTR::from("WmiSetBrightness"), WBEM_GENERIC_FLAG_TYPE(0), None, &inst, None, None);
+    }
+}
+
 /// Initialises COM on the calling thread (the worker thread owns all COM objects).
 pub fn com_init() { unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); } }
 

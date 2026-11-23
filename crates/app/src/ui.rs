@@ -26,7 +26,7 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Calendar, Sound, Power }
+enum Popup { Calendar, Sound, Power, Battery }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm { Sleep, SignOut, Restart, ShutDown, Uninstall }
@@ -57,6 +57,8 @@ pub struct Bar {
     popup_closed: Option<(Popup, Instant)>,
     /// The month shown in the calendar.
     cal: (i32, u32),
+    /// The brightness being dragged, until the slider is let go.
+    bright_drag: Option<f32>,
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -121,7 +123,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -483,7 +485,8 @@ impl Bar {
                     }
                 }
                 if let Some((b, charging)) = s.battery {
-                    if self.chip(ui, Some(format!("{b}%")), false, |p, g| glyph::battery(p, g, b, charging, fg, accent)).clicked() { sys::press_win(Some(b'A' as u16)); }
+                    let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
+                    if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
                 }
                 if self.chip(ui, None, false, |p, g| glyph::network(p, g, s.online, fg, muted)).clicked() { sys::press_win(Some(b'A' as u16)); }
                 self.divider(ui);
@@ -569,6 +572,46 @@ impl Bar {
         let mut mute = m;
         if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
         self.settings_link(ui, "Sound settings", "sound");
+    }
+
+    fn pop_battery(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        if let Some((b, charging)) = s.battery {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(44.0, 30.0), Sense::hover());
+                glyph::battery(ui.painter(), r, b, charging, c(t.fg), c(t.accent));
+                ui.label(RichText::new(format!("{b}%")).size(30.0).strong());
+            });
+            let status = match (charging, s.battery_left) {
+                (true, _) if b >= 100 => "Plugged in, fully charged".to_string(),
+                (true, _) => "Charging".to_string(),
+                (false, Some(m)) if m >= 60 => format!("On battery · about {} h {} min left", m / 60, m % 60),
+                (false, Some(m)) => format!("On battery · about {m} min left"),
+                (false, None) => "On battery".to_string(),
+            };
+            ui.label(RichText::new(status).color(c(t.muted)));
+            if s.saver { ui.label(RichText::new("Battery saver is on").color(c(t.accent)).size(12.0)); }
+        } else {
+            ui.label(RichText::new("No battery: this PC runs on mains power.").color(c(t.muted)));
+        }
+        ui.add_space(12.0);
+        match s.brightness {
+            Some(br) => {
+                ui.label(RichText::new(format!("Screen brightness  {:.0}%", self.bright_drag.unwrap_or(f32::from(br)))).strong());
+                let mut v = self.bright_drag.unwrap_or(f32::from(br));
+                ui.spacing_mut().slider_width = ui.available_width();
+                // Sent when the slider is let go, so the screen is not asked a hundred times while dragging.
+                let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).show_value(false));
+                if r.changed() { self.bright_drag = Some(v); }
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    let _ = self.tx.send(worker::Cmd::Brightness(v.round() as u8));
+                    self.bright_drag = None;
+                }
+            }
+            None => { ui.label(RichText::new("Brightness of this screen is set on the monitor itself.").color(c(t.muted)).size(12.0)); }
+        }
+        self.settings_link(ui, "Power & battery settings", "batterysaver");
     }
 
     fn pop_power(&mut self, ui: &mut egui::Ui) {
@@ -912,7 +955,7 @@ impl eframe::App for Bar {
             if close { self.panel = false; }
         }
         if let Some(p) = self.popup {
-            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0) };
+            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0) };
             let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
             let builder = egui::ViewportBuilder::default()
                 .with_title(POPUP_TITLE)
@@ -924,7 +967,7 @@ impl eframe::App for Bar {
                 let t = self.theme();
                 egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui) }
+                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui) }
                 });
                 // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
