@@ -25,12 +25,14 @@ jobs:
           Copy-Item target/release/ronin-bar.exe "dist/Ronin-Bar-$v.exe"
           $h = (Get-FileHash "dist/Ronin-Bar-$v.exe" -Algorithm SHA256).Hash.ToLower()
           "$h  Ronin-Bar-$v.exe" | Out-File "dist/Ronin-Bar-$v.exe.sha256" -Encoding ascii -NoNewline
-          $notes = "Download **Ronin-Bar-$v.exe** and run it: it asks once, then installs itself into one folder.`n`nUninstall from Settings → Apps → Ronin Bar.`n`nSHA-256: ``$h``"
+          # What's new comes from docs/release-notes/v<version>.md (shown on GitHub and in the bar's update popup).
+          $new = if (Test-Path "docs/release-notes/v$v.md") { (Get-Content "docs/release-notes/v$v.md" -Raw).Trim() + "`n`n" } else { "" }
+          $notes = "$new" + "Download **Ronin-Bar-$v.exe** and run it: it asks once, then installs itself into one folder. Already running Ronin Bar 0.5 or newer? It offers this update by itself.`n`nUninstall from Settings → Apps → Ronin Bar.`n`nSHA-256: ``$h``"
           # A version that is already released gets its files replaced (same version, newer build).
           gh release view "v$v" *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload "v$v" dist/* --clobber
-            gh release edit "v$v" --notes "$notes`n`nUpdated build from commit $env:GITHUB_SHA."
+            gh release edit "v$v" --notes "$notes"
           } else {
             gh release create "v$v" dist/* --title "Ronin Bar $v" --notes $notes --target $env:GITHUB_SHA
           }
