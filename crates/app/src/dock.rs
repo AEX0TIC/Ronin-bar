@@ -22,6 +22,24 @@ pub struct Win {
     pub hwnd: isize,
     pub title: String,
     pub exe: Option<String>,
+    /// The installed app behind the window (`shell:AppsFolder\\…`), when Windows knows it. Store
+    /// apps such as Settings all run inside one host program, so this is how their own name and
+    /// icon are found.
+    pub app: Option<String>,
+}
+
+impl Win {
+    /// The program file, unless it is only a host for Store apps.
+    pub fn own_exe(&self) -> Option<&str> {
+        self.exe.as_deref().filter(|e| {
+            let l = e.to_ascii_lowercase();
+            !l.ends_with("\\applicationframehost.exe") && !l.contains("\\windowsapps\\")
+        })
+    }
+    /// What to pin for this window: its program, or its installed app.
+    pub fn pin_target(&self) -> Option<String> {
+        self.own_exe().map(str::to_string).or_else(|| self.app.clone())
+    }
 }
 
 fn h(hwnd: isize) -> HWND { HWND(hwnd as *mut c_void) }
@@ -58,16 +76,83 @@ pub fn launch(path: &str) -> bool {
     r.0 as isize > 32
 }
 
-fn exe_of(hwnd: HWND) -> Option<String> {
+fn exe_of(pid: u32) -> Option<String> {
     unsafe {
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
         let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(p, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
         let _ = CloseHandle(p);
         ok.then(|| String::from_utf16_lossy(&buf[..len as usize]))
+    }
+}
+
+fn pid_of(hwnd: HWND) -> u32 {
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)); }
+    pid
+}
+
+/// The app id Windows gave a window (the taskbar groups windows by it).
+fn window_app_id(hwnd: HWND) -> Option<String> {
+    use windows::Win32::Storage::EnhancedStorage::PKEY_AppUserModel_ID;
+    use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+    use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
+    unsafe {
+        let store: IPropertyStore = SHGetPropertyStoreForWindow(hwnd).ok()?;
+        let v = store.GetValue(&PKEY_AppUserModel_ID).ok()?;
+        let p = PropVariantToStringAlloc(&v).ok()?;
+        let s = p.to_string().ok();
+        windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _));
+        s.filter(|s| !s.trim().is_empty())
+    }
+}
+
+/// The app id of a Store app's process.
+fn process_app_id(pid: u32) -> Option<String> {
+    use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
+    unsafe {
+        let p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let r = GetApplicationUserModelId(p, &mut len, Some(PWSTR(buf.as_mut_ptr())));
+        let _ = CloseHandle(p);
+        (r.0 == 0 && len > 1).then(|| String::from_utf16_lossy(&buf[..(len as usize - 1).min(buf.len())]))
+    }
+}
+
+/// The program and installed app behind a window. For a Store app's frame, the app itself runs
+/// in a child window of its own process.
+fn identify(hwnd: HWND) -> (Option<String>, Option<String>) {
+    let mut exe = exe_of(pid_of(hwnd));
+    let mut id = window_app_id(hwnd);
+    let host = exe.as_deref().map(|e| e.to_ascii_lowercase().ends_with("\\applicationframehost.exe")).unwrap_or(false);
+    if host {
+        if let Ok(core) = unsafe { FindWindowExW(Some(hwnd), None, w!("Windows.UI.Core.CoreWindow"), None) } {
+            let pid = pid_of(core);
+            if let Some(e) = exe_of(pid) { exe = Some(e); }
+            if id.is_none() { id = process_app_id(pid); }
+        }
+    } else if id.is_none() && exe.as_deref().map(|e| e.to_ascii_lowercase().contains("\\windowsapps\\")).unwrap_or(false) {
+        id = process_app_id(pid_of(hwnd));
+    }
+    let app = id.map(|i| format!("{}{i}", dock::APP_PREFIX)).filter(|a| dock::is_app_id(a));
+    (exe, app)
+}
+
+/// The icon a window shows in its own title bar (for programs Windows has no file icon for).
+pub fn window_icon(hwnd: isize) -> Option<(usize, usize, Vec<u8>)> {
+    unsafe {
+        let mut icon = 0usize;
+        for kind in [1usize, 2, 0] {   // ICON_BIG, ICON_SMALL2, ICON_SMALL
+            let mut r = 0usize;
+            let ok = SendMessageTimeoutW(h(hwnd), WM_GETICON, WPARAM(kind), LPARAM(0), SMTO_ABORTIFHUNG | SMTO_BLOCK, 60, Some(&mut r));
+            if ok.0 != 0 && r != 0 { icon = r; break }
+        }
+        if icon == 0 { icon = GetClassLongPtrW(h(hwnd), GCLP_HICON); }
+        if icon == 0 { icon = GetClassLongPtrW(h(hwnd), GCLP_HICONSM); }
+        // The window owns this icon; it is only read, never destroyed here.
+        if icon == 0 { None } else { icon_pixels(HICON(icon as *mut c_void)) }
     }
 }
 
@@ -104,8 +189,8 @@ pub fn windows(known: &[Win]) -> Vec<Win> {
         let mut buf = [0u16; 256];
         let n = unsafe { GetWindowTextW(hwnd, &mut buf) }.max(0) as usize;
         let title = String::from_utf16_lossy(&buf[..n]);
-        let exe = match known.iter().find(|k| k.hwnd == raw) { Some(k) => k.exe.clone(), None => exe_of(hwnd) };
-        out.push(Win { hwnd: raw, title, exe });
+        let (exe, app) = match known.iter().find(|k| k.hwnd == raw) { Some(k) => (k.exe.clone(), k.app.clone()), None => identify(hwnd) };
+        out.push(Win { hwnd: raw, title, exe, app });
     }
     out
 }

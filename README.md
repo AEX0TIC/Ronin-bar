@@ -16,7 +16,7 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 |---|---|
 | Ronin mark | **Ronin launcher**: every installed app (Store apps too) with icons, search (Enter opens the first match), pinned apps, right-click to pin, power menu. Right-click the mark: Ronin's panel |
 | pinned apps | Click to open. Right-click to manage them. Pick them from your Start menu with ▦ (up to 16) |
-| open windows | Click to bring a window to the front, click the one in front to minimise it, middle-click to close it, right-click to pin its program. A bar under the icon marks the window in front; dimmed icons are minimised |
+| open windows | Every open window with its real icon, Store apps such as Settings included. Click to bring a window to the front, click the one in front to minimise it, middle-click to close it, right-click to pin its app. A bar under the icon marks the window in front; dimmed icons are minimised |
 
 **Middle:** time and date. Click: **Ronin calendar** (today, month view, < > between months).
 
@@ -25,7 +25,7 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 | | |
 |---|---|
 | cpu, ram | Processor and memory use. Click: Task Manager |
-| network | **Ronin network**: Wi-Fi networks with signal, connect / disconnect / join with a password, Wi-Fi and Bluetooth on/off |
+| network | **Ronin quick settings**: tiles for Wi-Fi (arrow: **Ronin network**, the list of networks with connect / disconnect / join with a password), Bluetooth, airplane mode, night light (with a strength slider), mobile hotspot, accessibility (magnifier, on-screen keyboard, sticky keys, narrator, live captions), project (PC screen only / duplicate / extend / second screen only), cast, live captions, nearby sharing, power & battery and screen snip; then brightness and volume sliders, battery, Ronin settings and power |
 | battery | Charge (bolt while charging). Click: **Ronin battery**: time left, battery saver, screen brightness slider |
 | speaker | Click: **Ronin sound** (volume slider, mute). Scroll to change the volume, right-click to mute |
 | picture | Wallpapers. Right-click: next wallpaper |
@@ -33,6 +33,8 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 | ▦ | Apps: search the Start menu, pin, unpin, reorder |
 | ⚙ | Settings: replace the taskbar, start with Windows, quit, uninstall |
 | power | **Ronin power menu**: lock, sleep, sign out, restart, shut down (asks first, except lock) |
+
+Every popup is one window that Ronin Bar keeps ready, so it opens instantly, and it updates live as Wi-Fi, volume or battery change. Night light is Ronin's own: it warms the screen's colours itself. Cast and nearby sharing have no public switch in Windows, so those tiles open Windows' own screen for them.
 
 **9 Ronin originals**, drawn by Ronin Bar itself at your screen's resolution: a sunset over misty mountains with stars, clouds across the sun, a torii gate, birds and a lone ronin (cherry petals in Sakura and Washi), one in each theme's colours. They are ready on first start, work offline, and follow the theme.
 

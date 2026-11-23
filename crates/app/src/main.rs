@@ -47,7 +47,7 @@ fn main() {
     if !sys::single_instance() { return }
     // Whatever happens, never leave the PC without a taskbar.
     let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); default_hook(info); }));
+    std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); sys::night_light(0); default_hook(info); }));
 
     let mut settings = store.load_settings();
     if settings.original.is_none() {
@@ -64,6 +64,9 @@ fn main() {
             .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
             .with_inner_size([w as f32 / scale, ui::BAR_HEIGHT]).with_position([0.0, 0.0])
             .with_icon(logo()),
+        // The bar and its popups are separate windows drawn one after the other; waiting for the
+        // screen's refresh after each would halve how fast they react.
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
     let _ = eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings)))));

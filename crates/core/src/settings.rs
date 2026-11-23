@@ -29,13 +29,16 @@ pub struct Settings {
     pub pinned: Vec<String>,
     /// Hide the Windows taskbar while Ronin Bar runs (it comes back when the bar quits).
     pub hide_taskbar: bool,
+    /// Ronin's night light (a warmer screen), and how strong it is in percent.
+    pub night_light: bool,
+    pub night_strength: u8,
     /// Filled once, the first time Ronin Bar changes anything.
     pub original: Option<Original>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, original: None }
     }
 }
 
@@ -49,6 +52,7 @@ impl Settings {
         if !crate::theme::THEMES.iter().any(|t| t.id == s.theme) { s.theme = Settings::default().theme; }
         if !AUTO_CHANGE_CHOICES.contains(&s.auto_change_minutes) { s.auto_change_minutes = 0; }
         if !crate::wallhaven::is_id(&s.wallpaper) { s.wallpaper.clear(); }
+        if !(10..=100).contains(&s.night_strength) { s.night_strength = crate::night::DEFAULT_STRENGTH; }
         s.pinned = crate::dock::clean_pins(std::mem::take(&mut s.pinned));
         s
     }
