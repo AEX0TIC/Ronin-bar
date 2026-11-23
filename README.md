@@ -125,7 +125,7 @@ Each popup opens under the item you clicked, in your theme. It closes with **Esc
 - **Calendar** (clock): a large clock, today's date, and a month view with today marked.
 - **Sound**, **Battery** and **Power**: see [the bar](#the-bar).
 - **Wi-Fi** and **Bluetooth**: see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth).
-- **Ronin panel** (right-click the mark, or the buttons at the right of the bar): wallpapers, themes and settings.
+- **Wallpapers**, **Themes** and **Settings** (the picture, half-circle and gear buttons on the bar): each opens its own page. Right-clicking the Ronin mark reopens the last one.
 
 The popups are kept ready in the background, so they open instantly and update live as Wi-Fi, volume or battery change.
 
@@ -231,6 +231,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.7.3** | Wallpapers, Themes and Settings each open as their own page from their bar button; Settings shows only settings |
 | **0.7.2** | The bar follows the screen's real scale: proper height and width after a scale or monitor change, and the panel and popups open in the right place |
 | **0.7.1** | The launcher lists only software: programs and game launchers from your desktop are added (not files, videos or documents), apps like DaVinci Resolve are found through their install folder, Command Prompt, PowerShell and Windows' admin tools are gone, and so is the power button |
 | **0.7.0** | A cleaner, easier launcher: only real apps (helpers, links and manuals left out), programs without a Start-menu entry added, Most used, smarter search with initials, arrow keys, and a right-click menu to pin, hide or show in folder |
