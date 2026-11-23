@@ -1,6 +1,6 @@
 //! The dock across the top of the screen and its control panel.
 use crate::glyph::{self, Glyph};
-use crate::{dock, download, install, store::Store, sys, worker};
+use crate::{dock, download, install, net, store::Store, sys, worker};
 use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
@@ -13,6 +13,7 @@ use windows::Win32::Foundation::HWND;
 
 pub const TITLE: &str = "Ronin Bar";
 const PANEL_TITLE: &str = "Ronin Bar · control";
+const POPUP_TITLE: &str = "Ronin Bar · popup";
 /// Bar height in logical pixels.
 pub const BAR_HEIGHT: f32 = 36.0;
 /// Dock icon size and slot width in logical pixels.
@@ -23,8 +24,15 @@ const CLOCK_W: f32 = 170.0;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
+/// Ronin's own popups, opened from the bar in place of Windows' flyouts.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum Popup { Launcher, Calendar, Sound, Power, Battery, Network }
+
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Confirm { Sleep, Restart, ShutDown, Uninstall }
+enum Confirm { Sleep, SignOut, Restart, ShutDown, Uninstall }
+
+/// Installed apps (name, launch id), once read.
+type AppList = Arc<Mutex<Option<Vec<(String, String)>>>>;
 
 pub struct Bar {
     store: Arc<Store>,
@@ -45,6 +53,26 @@ pub struct Bar {
     bar_px: i32,
     topmost: bool,
     panel: bool,
+    /// The open popup, the bar position it hangs from, when it opened, and the last one closed.
+    popup: Option<Popup>,
+    popup_x: f32,
+    popup_at: Instant,
+    popup_closed: Option<(Popup, Instant)>,
+    /// The month shown in the calendar.
+    cal: (i32, u32),
+    /// Wi-Fi and Bluetooth (their own thread), the network whose password is being typed, and the
+    /// last scan asked for.
+    net: Arc<Mutex<net::NetState>>,
+    net_tx: Sender<net::NetCmd>,
+    joining: Option<(String, String)>,
+    net_scan_at: Instant,
+    /// Every installed app (name, launch id), read in the background; when it was read; the
+    /// launcher's search text.
+    all_apps: AppList,
+    all_apps_at: Instant,
+    search: String,
+    /// The brightness being dragged, until the slider is let go.
+    bright_drag: Option<f32>,
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -98,6 +126,7 @@ impl Bar {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
         let (stats, tx) = worker::start();
+        let (net, net_tx) = net::start();
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
         let packs = Arc::new(Mutex::new(store.load_packs()));
@@ -108,14 +137,36 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, tab: Tab::Apps,
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
 
     fn theme(&self) -> &'static Theme { theme::by_id(&self.settings.theme) }
     fn save(&self) { self.store.save_settings(&self.settings); }
-    fn open(&mut self, tab: Tab) { if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; } }
+    fn open(&mut self, tab: Tab) {
+        self.popup = None;
+        if self.panel && self.tab == tab { self.panel = false } else { self.panel = true; self.tab = tab; self.confirm = None; }
+    }
+
+    /// Opens a popup under the bar item at `x`, or closes it if it is open. (A click on the bar
+    /// first takes focus from an open popup, which closes it; that click must not reopen it.)
+    fn toggle_popup(&mut self, p: Popup, x: f32) {
+        let just_closed = matches!(self.popup_closed, Some((q, at)) if q == p && at.elapsed() < Duration::from_millis(400));
+        if self.popup == Some(p) || just_closed { self.close_popup(); self.popup_closed = None; return }
+        self.panel = false;
+        self.popup = Some(p);
+        self.popup_x = x;
+        self.popup_at = Instant::now();
+        if p == Popup::Calendar { let (y, m, _) = sys::today(); self.cal = (y, m); }
+        if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
+        if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
+    }
+
+    fn close_popup(&mut self) {
+        if let Some(p) = self.popup.take() { self.popup_closed = Some((p, Instant::now())); }
+    }
 
     /// Built-in wallpapers first, then wallhaven's, then the GitHub packs'.
     fn walls(&self) -> Vec<Wallpaper> {
@@ -167,7 +218,8 @@ impl Bar {
     fn icon(&mut self, ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
         if let Some(t) = self.icons.get(path) { return t.clone() }
         let tex = dock::icon_rgba(path).map(|(w, h, px)| {
-            ctx.load_texture(path, egui::ColorImage::from_rgba_unmultiplied([w, h], &px), egui::TextureOptions::LINEAR)
+            let img = if pins::is_app_id(path) { egui::ColorImage::from_rgba_premultiplied([w, h], &px) } else { egui::ColorImage::from_rgba_unmultiplied([w, h], &px) };
+            ctx.load_texture(path, img, egui::TextureOptions::LINEAR)
         });
         if self.icons.len() > 400 { self.icons.clear(); }
         self.icons.insert(path.to_string(), tex.clone());
@@ -343,7 +395,8 @@ impl Bar {
         // Pinned apps: click opens, right-click manages them.
         let pinned = self.settings.pinned.clone();
         for p in pinned.iter().take(slots) {
-            let r = self.slot(ui, Some(p), &pins::display_name(p), false, false);
+            let name = self.app_name(p);
+            let r = self.slot(ui, Some(p), &name, false, false);
             if r.clicked() && !dock::launch(p) { self.open(Tab::Apps); }
             if r.secondary_clicked() { self.open(Tab::Apps); }
         }
@@ -399,7 +452,7 @@ impl Bar {
             p.circle_filled(pos2(x0 + tw + 5.0, clock.center().y), 1.6, accent);
             p.galley(pos2(x0 + tw + 10.0, clock.center().y - dh / 2.0 + 0.5), date, muted);
         }
-        if cr.clicked() { sys::press_win(Some(b'N' as u16)); }
+        if cr.clicked() { self.toggle_popup(Popup::Calendar, clock.center().x); }
 
         ui.horizontal_centered(|ui| {
             ui.add_space(6.0);
@@ -407,8 +460,8 @@ impl Bar {
             let (mr, m) = ui.allocate_exact_size(vec2(40.0, BAR_HEIGHT), Sense::click());
             if m.hovered() { ui.painter().rect_filled(mr.shrink2(vec2(2.0, 4.0)), 9.0, c(t.surface)); }
             glyph::mark(ui.painter(), Rect::from_center_size(mr.center(), Vec2::splat(30.0)), accent, fg);
-            if m.clicked() { sys::press_win(None); }
-            if m.secondary_clicked() { self.panel = !self.panel; }
+            if m.clicked() { self.toggle_popup(Popup::Launcher, mr.center().x); }
+            if m.secondary_clicked() { self.popup = None; self.panel = !self.panel; }
             ui.add_space(4.0);
 
             // The dock, on a soft island, up to the clock.
@@ -428,7 +481,8 @@ impl Bar {
                 ui.add_space(6.0);
                 let lit = |tab: Tab| self.panel && self.tab == tab;
                 let (lp, ls, la, lt, lw, lv) = (lit(Tab::Power), lit(Tab::Settings), lit(Tab::Apps), lit(Tab::Themes), lit(Tab::Wallpapers), lit(Tab::Sound));
-                if self.chip(ui, None, lp, |p, g| glyph::draw(p, g, Glyph::Power, accent)).clicked() { self.open(Tab::Power); }
+                let pw = self.chip(ui, None, lp || self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
+                if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, pw.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
                 if self.chip(ui, None, la, |p, g| glyph::draw(p, g, Glyph::Apps, fg)).clicked() { self.open(Tab::Apps); }
@@ -439,9 +493,9 @@ impl Bar {
                 self.divider(ui);
                 if let Some((v, m)) = s.volume {
                     let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
-                    let r = self.chip(ui, Some(text), lv, |p, g| glyph::volume(p, g, v, m, fg));
-                    if r.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
-                    if r.secondary_clicked() { self.open(Tab::Sound); }
+                    let r = self.chip(ui, Some(text), lv || self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
+                    if r.clicked() { self.toggle_popup(Popup::Sound, r.rect.center().x); }
+                    if r.secondary_clicked() || r.middle_clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
                     if r.hovered() {
                         // One wheel notch = 5 %.
                         let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
@@ -450,9 +504,11 @@ impl Bar {
                     }
                 }
                 if let Some((b, charging)) = s.battery {
-                    if self.chip(ui, Some(format!("{b}%")), false, |p, g| glyph::battery(p, g, b, charging, fg, accent)).clicked() { sys::press_win(Some(b'A' as u16)); }
+                    let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
+                    if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
                 }
-                if self.chip(ui, None, false, |p, g| glyph::network(p, g, s.online, fg, muted)).clicked() { sys::press_win(Some(b'A' as u16)); }
+                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, s.online, fg, muted));
+                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
                 if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
@@ -462,6 +518,333 @@ impl Bar {
         // A fine accent line along the bottom edge.
         let y = full.bottom() - 0.5;
         ui.painter().line_segment([pos2(full.left(), y), pos2(full.right(), y)], Stroke::new(1.0, accent.gamma_multiply(0.45)));
+    }
+
+    // ───── popups ─────
+
+    fn pop_calendar(&mut self, ui: &mut egui::Ui) {
+        use ronin_core::calendar::{grid, shift, weekday, MONTHS, WEEKDAYS};
+        let t = self.theme();
+        let (ty, tm, td) = sys::today();
+        let (_, _, _, h, mi) = sys::local_time();
+        ui.label(RichText::new(format!("{h:02}:{mi:02}")).size(34.0).strong());
+        ui.label(RichText::new(format!("{}, {} {} {}", WEEKDAYS[weekday(ty, tm, td) as usize], td, MONTHS[(tm as usize + 11) % 12], ty)).color(c(t.muted)));
+        ui.add_space(10.0);
+        let (y, m) = self.cal;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("{} {}", MONTHS[(m as usize + 11) % 12], y)).strong().size(15.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button(">").clicked() { self.cal = shift(y, m, 1); }
+                if (y, m) != (ty, tm) && ui.small_button("today").clicked() { self.cal = (ty, tm); }
+                if ui.small_button("<").clicked() { self.cal = shift(y, m, -1); }
+            });
+        });
+        ui.add_space(6.0);
+        let cell = vec2((ui.available_width() / 7.0).floor(), 34.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            for d in ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"] {
+                let (r, _) = ui.allocate_exact_size(vec2(cell.x, 22.0), Sense::hover());
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, d, FontId::proportional(11.5), c(t.muted));
+            }
+        });
+        for week in grid(y, m) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                for (i, day) in week.iter().enumerate() {
+                    let (r, _) = ui.allocate_exact_size(cell, Sense::hover());
+                    let Some(d) = day else { continue };
+                    let today = (y, m, *d) == (ty, tm, td);
+                    if today { ui.painter().circle_filled(r.center(), 14.0, c(t.accent)); }
+                    let col = if today { c(t.bg) } else if i == 0 || i == 6 { c(t.muted) } else { c(t.fg) };
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, d.to_string(), FontId::proportional(13.0), col);
+                }
+            });
+        }
+    }
+
+    /// A "more in Windows settings" link at the bottom of a popup.
+    fn settings_link(&self, ui: &mut egui::Ui, label: &str, page: &str) {
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            if ui.add(egui::Button::new(RichText::new(label).size(12.0).color(c(self.theme().muted))).frame(false)).clicked() { sys::open_settings(page); }
+        });
+    }
+
+    fn pop_sound(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        let Some((v, m)) = s.volume else { ui.label("No sound device found."); return };
+        ui.horizontal(|ui| {
+            let (r, mute) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+            if mute.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
+            glyph::volume(ui.painter(), r.shrink(3.0), v, m, c(if m { t.muted } else { t.fg }));
+            if mute.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
+            ui.label(RichText::new("Sound").strong().size(15.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(if m { "muted".to_string() } else { format!("{:.0}%", v * 100.0) }).size(15.0));
+            });
+        });
+        ui.add_space(8.0);
+        let mut pct = (v * 100.0).round();
+        ui.spacing_mut().slider_width = ui.available_width();
+        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false)).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
+        ui.add_space(6.0);
+        let mut mute = m;
+        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
+        self.settings_link(ui, "Sound settings", "sound");
+    }
+
+    /// Reads the installed apps in the background (again if the list is over a minute old, so new
+    /// installs show up).
+    fn load_apps(&mut self) {
+        if self.all_apps_at.elapsed() < Duration::from_secs(60) { return }
+        self.all_apps_at = Instant::now();
+        let slot = self.all_apps.clone();
+        std::thread::spawn(move || {
+            sys::com_init();
+            let list = dock::all_apps();
+            if let Ok(mut s) = slot.lock() { *s = Some(list); }
+        });
+    }
+
+    /// A pinned app's name: its real name for installed apps, else from its file name.
+    fn app_name(&self, pin: &str) -> String {
+        if pins::is_app_id(pin) {
+            if let Some(n) = self.all_apps.lock().ok().and_then(|l| l.as_ref().and_then(|l| l.iter().find(|(_, id)| id == pin).map(|(n, _)| n.clone()))) { return n }
+        }
+        pins::display_name(pin)
+    }
+
+    fn pop_launcher(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let ctx = ui.ctx().clone();
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(26.0), Sense::hover());
+            glyph::mark(ui.painter(), r, c(t.accent), c(t.fg));
+            ui.label(RichText::new("R O N I N").strong().size(15.0));
+        });
+        ui.add_space(6.0);
+        let field = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search apps").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+        if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        ui.add_space(8.0);
+        let apps = self.all_apps.lock().ok().and_then(|l| l.clone());
+        let mut launch: Option<String> = None;
+        let mut pin: Option<String> = None;
+        if self.search.trim().is_empty() && !self.settings.pinned.is_empty() {
+            ui.label(RichText::new("PINNED").color(c(t.accent)).size(11.0));
+            let pinned = self.settings.pinned.clone();
+            ui.horizontal_wrapped(|ui| {
+                for p in pinned.iter().take(12) {
+                    let name = self.app_name(p);
+                    let (rect, r) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::click());
+                    if r.hovered() { ui.painter().rect_filled(rect, 10.0, c(t.surface)); }
+                    let icon = Rect::from_center_size(rect.center() - vec2(0.0, 8.0), Vec2::splat(30.0));
+                    match self.icon(&ctx, p) {
+                        Some(tex) => { egui::Image::new((tex.id(), Vec2::splat(30.0))).paint_at(ui, icon); }
+                        None => { ui.painter().rect_filled(icon, 7.0, c(t.surface)); }
+                    }
+                    let short: String = name.chars().take(10).collect();
+                    ui.painter().text(egui::pos2(rect.center().x, rect.bottom() - 9.0), egui::Align2::CENTER_CENTER, short, FontId::proportional(10.5), c(t.fg));
+                    if r.on_hover_text(&name).clicked() { launch = Some(p.clone()); }
+                }
+            });
+            ui.add_space(6.0);
+        }
+        ui.label(RichText::new(if self.search.trim().is_empty() { "ALL APPS" } else { "RESULTS" }).color(c(t.accent)).size(11.0));
+        match apps {
+            None => { ui.label(RichText::new("Reading your apps…").color(c(t.muted))); }
+            Some(list) => {
+                let found: Vec<&(String, String)> = list.iter().filter(|(n, _)| pins::matches(n, &self.search)).collect();
+                if enter { if let Some((_, id)) = found.first() { launch = Some(id.clone()); } }
+                let footer = 44.0;
+                egui::ScrollArea::vertical().max_height((ui.available_height() - footer).max(80.0)).auto_shrink([false, false]).show_rows(ui, 30.0, found.len(), |ui, range| {
+                    for (name, id) in &found[range] {
+                        let (rect, r) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                        if r.hovered() { ui.painter().rect_filled(rect, 8.0, c(t.surface)); }
+                        let icon = Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), Vec2::splat(22.0));
+                        if let Some(tex) = self.icon(&ctx, id) { egui::Image::new((tex.id(), Vec2::splat(22.0))).paint_at(ui, icon); }
+                        ui.painter().text(egui::pos2(rect.left() + 38.0, rect.center().y), egui::Align2::LEFT_CENTER, name, FontId::proportional(13.5), c(t.fg));
+                        let pinned = self.settings.pinned.iter().any(|p| p == id);
+                        if r.hovered() && !pinned {
+                            ui.painter().text(egui::pos2(rect.right() - 10.0, rect.center().y), egui::Align2::RIGHT_CENTER, "right-click to pin", FontId::proportional(10.5), c(t.muted));
+                        }
+                        if r.clicked() { launch = Some(id.clone()); }
+                        if r.secondary_clicked() && !pinned { pin = Some(id.clone()); }
+                    }
+                });
+                if found.is_empty() { ui.label(RichText::new("No app matches.").color(c(t.muted))); }
+            }
+        }
+        if let Some(p) = pin { self.pin(&p); }
+        if let Some(id) = launch { dock::launch(&id); self.close_popup(); return }
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+            ui.horizontal(|ui| {
+                if ui.button("Ronin settings").clicked() { self.open(Tab::Settings); }
+                if ui.button("Wallpapers").clicked() { self.open(Tab::Wallpapers); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+                    if resp.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
+                    glyph::draw(ui.painter(), r.shrink(5.0), Glyph::Power, c(t.accent));
+                    if resp.clicked() { let x = self.screen_w - 160.0; self.confirm = None; self.popup = None; self.toggle_popup(Popup::Power, x); }
+                });
+            });
+        });
+    }
+
+    /// An on/off switch.
+    fn switch(&self, ui: &mut egui::Ui, on: bool) -> egui::Response {
+        let t = self.theme();
+        let (r, resp) = ui.allocate_exact_size(vec2(38.0, 20.0), Sense::click());
+        ui.painter().rect_filled(r, 10.0, if on { c(t.accent) } else { c(t.surface) });
+        let x = if on { r.right() - 10.0 } else { r.left() + 10.0 };
+        ui.painter().circle_filled(egui::pos2(x, r.center().y), 7.0, if on { c(t.bg) } else { c(t.muted) });
+        resp
+    }
+
+    fn pop_network(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        if self.net_scan_at.elapsed() > Duration::from_secs(10) {
+            let _ = self.net_tx.send(net::NetCmd::Scan);
+            self.net_scan_at = Instant::now();
+        }
+        let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
+        let online = self.stats.lock().map(|s| s.online).unwrap_or(false);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Wi-Fi").strong().size(15.0));
+            if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(on) = st.wifi_on {
+                    if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: false, on: !on }); }
+                }
+            });
+        });
+        if st.no_wifi {
+            ui.label(RichText::new(if online { "No Wi-Fi here; connected by cable." } else { "No Wi-Fi adapter, and not connected." }).color(c(t.muted)));
+        }
+        if let Some(b) = &st.busy { ui.label(RichText::new(b).color(c(t.muted)).size(12.0)); }
+        if let Some(e) = &st.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+        ui.add_space(4.0);
+        let mut action: Option<net::NetCmd> = None;
+        let mut open_join: Option<String> = None;
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            if st.wifi_on == Some(false) { ui.label(RichText::new("Wi-Fi is off.").color(c(t.muted))); return }
+            for n in &st.networks {
+                ui.horizontal(|ui| {
+                    // Signal bars.
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 16.0), Sense::hover());
+                    let lit = ronin_core::wifi::bars(n.quality);
+                    for i in 0..4u8 {
+                        let h = 4.0 + f32::from(i) * 3.5;
+                        let bar = Rect::from_min_size(egui::pos2(r.left() + f32::from(i) * 4.5, r.bottom() - h), vec2(3.0, h));
+                        ui.painter().rect_filled(bar, 1.0, if i < lit.max(1) { c(t.fg) } else { c(t.surface) });
+                    }
+                    let name = RichText::new(&n.ssid).strong();
+                    ui.label(if n.connected { name.color(c(t.accent)) } else { name });
+                    if n.security != ronin_core::wifi::Security::Open { ui.label(RichText::new("secured").color(c(t.muted)).size(11.0)); }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if n.connected {
+                            if ui.small_button("disconnect").clicked() { action = Some(net::NetCmd::Disconnect); }
+                        } else if n.security == ronin_core::wifi::Security::Other && !n.known {
+                            if ui.small_button("in Windows").clicked() { sys::open_settings("network-wifi"); }
+                        } else if ui.small_button("connect").clicked() {
+                            if n.known || n.security == ronin_core::wifi::Security::Open {
+                                action = Some(net::NetCmd::Connect { ssid: n.ssid.clone(), password: String::new() });
+                            } else {
+                                open_join = Some(n.ssid.clone());
+                            }
+                        }
+                    });
+                });
+                // Password box under a new secured network.
+                if self.joining.as_ref().map(|(s, _)| s == &n.ssid).unwrap_or(false) {
+                    let mut go = false;
+                    ui.horizontal(|ui| {
+                        if let Some((_, pw)) = self.joining.as_mut() {
+                            let r = ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("password").desired_width(200.0));
+                            r.request_focus();
+                            go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        }
+                        if ui.small_button("join").clicked() { go = true; }
+                        if ui.small_button("cancel").clicked() { self.joining = None; }
+                    });
+                    if go {
+                        if let Some((ssid, pw)) = self.joining.take() {
+                            if ronin_core::wifi::valid_password(n.security, &pw) { action = Some(net::NetCmd::Connect { ssid, password: pw }); }
+                            else { self.joining = Some((ssid, pw)); }
+                        }
+                    }
+                }
+                ui.add_space(2.0);
+            }
+            if st.networks.is_empty() && !st.no_wifi { ui.label(RichText::new("Looking for networks…").color(c(t.muted))); }
+        });
+        if let Some(ssid) = open_join { self.joining = Some((ssid, String::new())); }
+        if let Some(a) = action { let _ = self.net_tx.send(a); }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Bluetooth").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match st.bluetooth_on {
+                    Some(on) => { if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: true, on: !on }); } }
+                    None => { ui.label(RichText::new("none").color(c(t.muted)).size(12.0)); }
+                }
+                if ui.add(egui::Button::new(RichText::new("devices").size(12.0).color(c(t.muted))).frame(false)).clicked() { sys::open_settings("bluetooth"); }
+            });
+        });
+        self.settings_link(ui, "Network settings", "network-status");
+    }
+
+    fn pop_battery(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        if let Some((b, charging)) = s.battery {
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(vec2(44.0, 30.0), Sense::hover());
+                glyph::battery(ui.painter(), r, b, charging, c(t.fg), c(t.accent));
+                ui.label(RichText::new(format!("{b}%")).size(30.0).strong());
+            });
+            let status = match (charging, s.battery_left) {
+                (true, _) if b >= 100 => "Plugged in, fully charged".to_string(),
+                (true, _) => "Charging".to_string(),
+                (false, Some(m)) if m >= 60 => format!("On battery · about {} h {} min left", m / 60, m % 60),
+                (false, Some(m)) => format!("On battery · about {m} min left"),
+                (false, None) => "On battery".to_string(),
+            };
+            ui.label(RichText::new(status).color(c(t.muted)));
+            if s.saver { ui.label(RichText::new("Battery saver is on").color(c(t.accent)).size(12.0)); }
+        } else {
+            ui.label(RichText::new("No battery: this PC runs on mains power.").color(c(t.muted)));
+        }
+        ui.add_space(12.0);
+        match s.brightness {
+            Some(br) => {
+                ui.label(RichText::new(format!("Screen brightness  {:.0}%", self.bright_drag.unwrap_or(f32::from(br)))).strong());
+                let mut v = self.bright_drag.unwrap_or(f32::from(br));
+                ui.spacing_mut().slider_width = ui.available_width();
+                // Sent when the slider is let go, so the screen is not asked a hundred times while dragging.
+                let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).show_value(false));
+                if r.changed() { self.bright_drag = Some(v); }
+                if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                    let _ = self.tx.send(worker::Cmd::Brightness(v.round() as u8));
+                    self.bright_drag = None;
+                }
+            }
+            None => { ui.label(RichText::new("Brightness of this screen is set on the monitor itself.").color(c(t.muted)).size(12.0)); }
+        }
+        self.settings_link(ui, "Power & battery settings", "batterysaver");
+    }
+
+    fn pop_power(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Power").strong().size(15.0));
+        ui.add_space(8.0);
+        let w = ui.available_width();
+        let big = |ui: &mut egui::Ui, label: &str| ui.add_sized([w, 32.0], egui::Button::new(RichText::new(label).size(14.0)));
+        if big(ui, "Lock").clicked() { let _ = self.tx.send(worker::Cmd::Lock); self.close_popup(); }
+        for (label, what) in [("Sleep", Confirm::Sleep), ("Sign out", Confirm::SignOut), ("Restart", Confirm::Restart), ("Shut down", Confirm::ShutDown)] {
+            if big(ui, label).clicked() { self.confirm = Some(what); }
+        }
+        self.confirm_row(ui);
     }
 
     // ───── the control panel ─────
@@ -586,6 +969,7 @@ impl Bar {
         let Some(what) = self.confirm else { return };
         let q = match what {
             Confirm::Sleep => "Put the PC to sleep now?",
+            Confirm::SignOut => "Sign out of Windows now?",
             Confirm::Restart => "Restart the PC now?",
             Confirm::ShutDown => "Shut down the PC now?",
             Confirm::Uninstall => "Remove Ronin Bar and its wallpapers, bring the taskbar back, and put your old wallpaper and colours back?",
@@ -597,6 +981,7 @@ impl Bar {
                 self.confirm = None;
                 match what {
                     Confirm::Sleep => { let _ = self.tx.send(worker::Cmd::Sleep); }
+                    Confirm::SignOut => { let _ = self.tx.send(worker::Cmd::SignOut); }
                     Confirm::Restart => { let _ = self.tx.send(worker::Cmd::Restart); }
                     Confirm::ShutDown => { let _ = self.tx.send(worker::Cmd::ShutDown); }
                     Confirm::Uninstall => {
@@ -789,6 +1174,28 @@ impl eframe::App for Bar {
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape))
             });
             if close { self.panel = false; }
+        }
+        if let Some(p) = self.popup {
+            let (w, h) = match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0), Popup::Network => (360.0, 470.0) };
+            let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
+            let builder = egui::ViewportBuilder::default()
+                .with_title(POPUP_TITLE)
+                .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
+                .with_inner_size([w, h]).with_position(egui::pos2(x, BAR_HEIGHT + 6.0));
+            let id = egui::ViewportId::from_hash_of(("ronin-popup", p));
+            let fresh = self.popup_at.elapsed() < Duration::from_millis(120);
+            let close = ctx.show_viewport_immediate(id, builder, |ui, _class| {
+                let t = self.theme();
+                egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui) }
+                });
+                // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
+                ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
+                    || (i.viewport().focused == Some(false) && !fresh && self.popup_at.elapsed() > Duration::from_millis(400)))
+            });
+            if fresh { ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus); }
+            if close { self.close_popup(); }
         }
     }
 

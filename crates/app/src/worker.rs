@@ -14,9 +14,14 @@ pub struct Stats {
     /// (level 0..1, muted), None without a sound device.
     pub volume: Option<(f32, bool)>,
     pub fullscreen: bool,
+    /// Minutes of battery left, and battery saver on.
+    pub battery_left: Option<u32>,
+    pub saver: bool,
+    /// Built-in screen brightness in percent (None when Windows cannot set it).
+    pub brightness: Option<u8>,
 }
 
-pub enum Cmd { Volume(f32), Mute(bool), Lock, Sleep, Restart, ShutDown }
+pub enum Cmd { Volume(f32), Mute(bool), Brightness(u8), Lock, Sleep, SignOut, Restart, ShutDown }
 
 pub fn start() -> (Arc<Mutex<Stats>>, Sender<Cmd>) {
     let stats = Arc::new(Mutex::new(Stats::default()));
@@ -30,6 +35,8 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
     sys::com_init();
     let net = sys::network_manager();
     let mut vol = sys::volume_endpoint();
+    let wmi = sys::wmi();
+    let mut brightness = wmi.as_ref().and_then(sys::brightness_get);
     let mut last = sys::cpu_times();
     let mut tick = 0u32;
     loop {
@@ -39,8 +46,14 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
             match c {
                 Cmd::Volume(v) => if let Some(e) = &vol { sys::volume_set(e, v); sys::mute_set(e, false) },
                 Cmd::Mute(m) => if let Some(e) = &vol { sys::mute_set(e, m) },
+                Cmd::Brightness(b) => if let Some(w) = &wmi {
+                    sys::brightness_set(w, b);
+                    brightness = sys::brightness_get(w);
+                    if let Ok(mut s) = stats.lock() { s.brightness = brightness; }
+                },
                 Cmd::Lock => sys::lock(),
                 Cmd::Sleep => sys::sleep(),
+                Cmd::SignOut => sys::sign_out(),
                 Cmd::Restart => sys::restart(),
                 Cmd::ShutDown => sys::shut_down(),
             }
@@ -53,6 +66,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
         tick += 1;
         if !tick.is_multiple_of(10) { continue }
         if tick.is_multiple_of(100) || vol.is_none() { vol = sys::volume_endpoint(); }   // headphones plugged in or out
+        if tick.is_multiple_of(30) { brightness = wmi.as_ref().and_then(sys::brightness_get); }   // changed by keys or Windows
         let now = sys::cpu_times();
         let cpu = ronin_core::cpu_percent(last, now);
         last = now;
@@ -61,6 +75,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
             online: net.as_ref().map(sys::online).unwrap_or(false),
             volume: vol.as_ref().and_then(sys::volume_get),
             fullscreen: sys::fullscreen_app_active(),
+            battery_left: sys::battery_detail().0, saver: sys::battery_detail().1, brightness,
         };
         if let Ok(mut s) = stats.lock() { *s = fresh; }
     }

@@ -14,24 +14,25 @@ The dock sits at the top of the screen and takes the Windows taskbar's place (tu
 
 | | |
 |---|---|
-| Ronin mark | Opens the Start menu. Right-click: Ronin's panel |
+| Ronin mark | **Ronin launcher**: every installed app (Store apps too) with icons, search (Enter opens the first match), pinned apps, right-click to pin, power menu. Right-click the mark: Ronin's panel |
 | pinned apps | Click to open. Right-click to manage them. Pick them from your Start menu with ▦ (up to 16) |
 | open windows | Click to bring a window to the front, click the one in front to minimise it, middle-click to close it, right-click to pin its program. A bar under the icon marks the window in front; dimmed icons are minimised |
 
-**Middle:** time and date. Click: notifications and calendar.
+**Middle:** time and date. Click: **Ronin calendar** (today, month view, < > between months).
 
 **Right: controls**, every one a single click
 
 | | |
 |---|---|
 | cpu, ram | Processor and memory use. Click: Task Manager |
-| network, battery | Online or not; charge (bolt while charging). Click: Windows quick settings (Wi-Fi, Bluetooth, brightness) |
-| speaker | Click to mute, scroll to change the volume, right-click for the sound panel |
+| network | **Ronin network**: Wi-Fi networks with signal, connect / disconnect / join with a password, Wi-Fi and Bluetooth on/off |
+| battery | Charge (bolt while charging). Click: **Ronin battery**: time left, battery saver, screen brightness slider |
+| speaker | Click: **Ronin sound** (volume slider, mute). Scroll to change the volume, right-click to mute |
 | picture | Wallpapers. Right-click: next wallpaper |
 | half circle | Themes |
 | ▦ | Apps: search the Start menu, pin, unpin, reorder |
 | ⚙ | Settings: replace the taskbar, start with Windows, quit, uninstall |
-| power | Lock, sleep, restart, shut down (asks before sleep, restart and shut down) |
+| power | **Ronin power menu**: lock, sleep, sign out, restart, shut down (asks first, except lock) |
 
 **9 Ronin originals**, drawn by Ronin Bar itself at your screen's resolution: a sunset over misty mountains with stars, clouds across the sun, a torii gate, birds and a lone ronin (cherry petals in Sakura and Washi), one in each theme's colours. They are ready on first start, work offline, and follow the theme.
 
