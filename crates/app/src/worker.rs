@@ -70,6 +70,11 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
         tick += 1;
+        // Volume is cheap to read: often, so volume keys and other apps show up at once.
+        if tick.is_multiple_of(2) {
+            let v = vol.as_ref().and_then(sys::volume_get);
+            if let Ok(mut s) = stats.lock() { if s.volume != v { s.volume = v; wake.request_repaint(); } }
+        }
         if !tick.is_multiple_of(10) { continue }
         if tick.is_multiple_of(100) || vol.is_none() { vol = sys::volume_endpoint(); }   // headphones plugged in or out
         if night > 0 && tick.is_multiple_of(50) { sys::night_light(night); }

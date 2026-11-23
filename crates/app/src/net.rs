@@ -32,6 +32,8 @@ pub struct NetState {
     pub busy: Option<String>,
     pub error: Option<String>,
     pub wifi_on: Option<bool>,
+    /// The Wi-Fi network Windows is connected to right now, and its signal (0–100).
+    pub connected: Option<(String, u32)>,
     pub bluetooth_on: Option<bool>,
     /// Mobile hotspot: on, off, or None when this PC cannot share its connection right now.
     pub hotspot_on: Option<bool>,
@@ -47,6 +49,10 @@ impl NetState {
 pub enum NetCmd {
     /// Re-read the list Windows already has (instant), without a new scan.
     Refresh,
+    /// Windows says something changed: a scan finished (true), or a connection or radio changed.
+    Changed(bool),
+    /// A radio was switched on or off (from Ronin, Windows or a key on the keyboard).
+    RadioChanged,
     Scan,
     Connect { ssid: String, password: String },
     Disconnect,
@@ -60,8 +66,8 @@ pub enum NetCmd {
 pub fn start(wake: eframe::egui::Context) -> (Arc<Mutex<NetState>>, Sender<NetCmd>) {
     let state = Arc::new(Mutex::new(NetState::default()));
     let (tx, rx) = channel();
-    let s = state.clone();
-    std::thread::spawn(move || run(s, rx, wake));
+    let (s, news) = (state.clone(), tx.clone());
+    std::thread::spawn(move || run(s, rx, news, wake));
     (state, tx)
 }
 
@@ -84,6 +90,38 @@ impl Wlan {
             }
         }
         Some(w)
+    }
+
+    /// The network Windows is connected to right now, asked directly (not from the scan list).
+    fn current(&self) -> Option<(String, u32)> {
+        let g = self.iface.as_ref()?;
+        unsafe {
+            let (mut size, mut data) = (0u32, std::ptr::null_mut::<std::ffi::c_void>());
+            if WlanQueryInterface(self.h, g, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None) != 0 || data.is_null() { return None }
+            let a = &*(data as *const WLAN_CONNECTION_ATTRIBUTES);
+            let r = (a.isState == wlan_interface_state_connected).then(|| {
+                let s = &a.wlanAssociationAttributes.dot11Ssid;
+                let len = (s.uSSIDLength as usize).min(32);
+                (String::from_utf8_lossy(&s.ucSSID[..len]).to_string(), a.wlanAssociationAttributes.wlanSignalQuality.min(100))
+            });
+            WlanFreeMemory(data as *const _);
+            r
+        }
+    }
+
+    /// Asks Windows to tell this program whenever Wi-Fi changes (scan finished, connected,
+    /// disconnected, radio on or off). The callback only passes the news on to the network thread.
+    fn listen(&self, tx: Sender<NetCmd>) {
+        unsafe extern "system" fn told(n: *mut L2_NOTIFICATION_DATA, ctx: *mut std::ffi::c_void) {
+            if n.is_null() || ctx.is_null() { return }
+            let (n, tx) = unsafe { (&*n, &*(ctx as *const Sender<NetCmd>)) };
+            let scan_done = n.NotificationSource == WLAN_NOTIFICATION_SOURCE_ACM
+                && (n.NotificationCode == wlan_notification_acm_scan_complete.0 as u32 || n.NotificationCode == wlan_notification_acm_scan_fail.0 as u32);
+            let _ = tx.send(NetCmd::Changed(scan_done));
+        }
+        // Kept for the life of the program, like the registration itself.
+        let ctx = Box::into_raw(Box::new(tx)) as *const std::ffi::c_void;
+        unsafe { WlanRegisterNotification(self.h, WLAN_NOTIFICATION_SOURCE_ACM | WLAN_NOTIFICATION_SOURCE_MSM, true, Some(told), Some(ctx), None, None); }
     }
 
     fn scan(&self) { if let Some(g) = &self.iface { unsafe { WlanScan(self.h, g, None, None, None); } } }
@@ -124,6 +162,16 @@ impl Wlan {
                 }
             }
             WlanFreeMemory(list as *const _);
+        }
+        // Which one is connected comes from Windows' own connection, not from the scan list,
+        // which can lag behind.
+        if let Some((ssid, q)) = self.current() {
+            for n in &mut out { n.connected = n.ssid == ssid; }
+            if !out.iter().any(|n| n.connected) {
+                out.push(Network { ssid, quality: q, security: Security::Other, connected: true, known: true, profile: String::new() });
+            }
+        } else {
+            for n in &mut out { n.connected = false; }
         }
         out.sort_by_key(|n| std::cmp::Reverse((n.connected, n.known, n.quality)));
         out
@@ -210,14 +258,33 @@ fn set_hotspot(on: bool) -> Result<(), String> {
     }
 }
 
-fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Context) {
+/// Asks Windows to report every radio being switched on or off (by Ronin, by Windows' own
+/// settings, or by a key on the keyboard).
+fn watch_radios(tx: Sender<NetCmd>) {
+    spawn(move || {
+        let Ok(list) = wait(Radio::GetRadiosAsync(), Duration::from_secs(10)) else { return };
+        let mut kept = Vec::new();
+        for r in list {
+            let t = tx.clone();
+            let h = windows::Foundation::TypedEventHandler::<Radio, windows::core::IInspectable>::new(move |_, _| { let _ = t.send(NetCmd::RadioChanged); Ok(()) });
+            if r.StateChanged(&h).is_ok() { kept.push(r); }
+        }
+        // The radios must stay alive for their reports to keep coming.
+        std::mem::forget(kept);
+    });
+}
+
+fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, news: Sender<NetCmd>, wake: eframe::egui::Context) {
     crate::sys::com_init_mta();
     let wlan = Wlan::open();
+    if let Some(w) = &wlan { w.listen(news.clone()); }
+    watch_radios(news);
     let set = |f: &dyn Fn(&mut NetState)| { if let Ok(mut s) = state.lock() { f(&mut s); } wake.request_repaint(); };
     set(&|s| s.no_wifi = wlan.as_ref().and_then(|w| w.iface).is_none());
     let list = |wlan: &Option<Wlan>| {
         let nets = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
-        set(&|s| s.networks = nets.clone());
+        let now = nets.iter().find(|n| n.connected).map(|n| (n.ssid.clone(), n.quality));
+        set(&|s| { s.networks = nets.clone(); s.connected = now.clone(); });
     };
     // Radio and hotspot state are read on a thread of their own (one at a time): those Windows
     // calls can be slow, and the Wi-Fi list must never wait for them.
@@ -262,7 +329,7 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
     let mut later: Vec<Instant> = Vec::new();
     let mut connecting: Option<(String, Instant)> = None;
     loop {
-        let wait = later.iter().min().map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(5));
+        let wait = later.iter().min().map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(10));
         let cmd = match rx.recv_timeout(wait.max(Duration::from_millis(30))) {
             Ok(c) => Some(c),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => None,
@@ -271,6 +338,12 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
         let soon = |ms: &[u64]| ms.iter().map(|m| Instant::now() + Duration::from_millis(*m)).collect::<Vec<_>>();
         match cmd {
             Some(NetCmd::Refresh) => { set(&|s| s.error = None); list(&wlan); radios_now(); }
+            Some(NetCmd::Changed(scan_done)) => {
+                if scan_done { set(&|s| s.scanning = false); }
+                // News often comes in bursts: read once, a moment after the first.
+                if !later.iter().any(|t| t.saturating_duration_since(Instant::now()) < Duration::from_millis(250)) { later.extend(soon(&[150])); }
+            }
+            Some(NetCmd::RadioChanged) => { radios_now(); later.extend(soon(&[400])); }
             Some(NetCmd::Scan) => {
                 // Windows allows a fresh scan every few seconds.
                 if last_scan.elapsed() > Duration::from_secs(4) {
@@ -316,7 +389,8 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
             Some(NetCmd::Hotspot(on)) => {
                 switch("Mobile hotspot", Box::new(move || set_hotspot(on)));
             }
-            None => {}
+            // Nothing happened for a while: a quick check anyway (cheap; no scan).
+            None => if later.is_empty() { list(&wlan); },
         }
         // Read the list again when one of the planned times has come.
         if later.iter().any(|t| *t <= Instant::now()) {
