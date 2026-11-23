@@ -211,6 +211,9 @@ pub fn brightness_set(svc: &IWbemServices, pct: u8) {
 }
 
 /// Initialises COM on the calling thread (the worker thread owns all COM objects).
+/// Initialises COM for a thread that uses Windows' async (WinRT) functions.
+pub fn com_init_mta() { unsafe { let _ = CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED); } }
+
 pub fn com_init() { unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); } }
 
 pub fn network_manager() -> Option<INetworkListManager> { unsafe { CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL).ok() } }

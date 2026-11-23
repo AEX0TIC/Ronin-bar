@@ -1,6 +1,6 @@
 //! The dock across the top of the screen and its control panel.
 use crate::glyph::{self, Glyph};
-use crate::{dock, download, install, store::Store, sys, worker};
+use crate::{dock, download, install, net, store::Store, sys, worker};
 use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
@@ -26,7 +26,7 @@ enum Tab { Apps, Wallpapers, Themes, Sound, Power, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Calendar, Sound, Power, Battery }
+enum Popup { Calendar, Sound, Power, Battery, Network }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Confirm { Sleep, SignOut, Restart, ShutDown, Uninstall }
@@ -57,6 +57,12 @@ pub struct Bar {
     popup_closed: Option<(Popup, Instant)>,
     /// The month shown in the calendar.
     cal: (i32, u32),
+    /// Wi-Fi and Bluetooth (their own thread), the network whose password is being typed, and the
+    /// last scan asked for.
+    net: Arc<Mutex<net::NetState>>,
+    net_tx: Sender<net::NetCmd>,
+    joining: Option<(String, String)>,
+    net_scan_at: Instant,
     /// The brightness being dragged, until the slider is let go.
     bright_drag: Option<f32>,
     tab: Tab,
@@ -112,6 +118,7 @@ impl Bar {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
         let (stats, tx) = worker::start();
+        let (net, net_tx) = net::start();
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
         let packs = Arc::new(Mutex::new(store.load_packs()));
@@ -123,7 +130,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -145,6 +152,7 @@ impl Bar {
         self.popup_x = x;
         self.popup_at = Instant::now();
         if p == Popup::Calendar { let (y, m, _) = sys::today(); self.cal = (y, m); }
+        if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
     }
 
     fn close_popup(&mut self) {
@@ -488,7 +496,8 @@ impl Bar {
                     let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
                     if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
                 }
-                if self.chip(ui, None, false, |p, g| glyph::network(p, g, s.online, fg, muted)).clicked() { sys::press_win(Some(b'A' as u16)); }
+                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, s.online, fg, muted));
+                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
                 if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
@@ -572,6 +581,109 @@ impl Bar {
         let mut mute = m;
         if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
         self.settings_link(ui, "Sound settings", "sound");
+    }
+
+    /// An on/off switch.
+    fn switch(&self, ui: &mut egui::Ui, on: bool) -> egui::Response {
+        let t = self.theme();
+        let (r, resp) = ui.allocate_exact_size(vec2(38.0, 20.0), Sense::click());
+        ui.painter().rect_filled(r, 10.0, if on { c(t.accent) } else { c(t.surface) });
+        let x = if on { r.right() - 10.0 } else { r.left() + 10.0 };
+        ui.painter().circle_filled(egui::pos2(x, r.center().y), 7.0, if on { c(t.bg) } else { c(t.muted) });
+        resp
+    }
+
+    fn pop_network(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        if self.net_scan_at.elapsed() > Duration::from_secs(10) {
+            let _ = self.net_tx.send(net::NetCmd::Scan);
+            self.net_scan_at = Instant::now();
+        }
+        let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
+        let online = self.stats.lock().map(|s| s.online).unwrap_or(false);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Wi-Fi").strong().size(15.0));
+            if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(on) = st.wifi_on {
+                    if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: false, on: !on }); }
+                }
+            });
+        });
+        if st.no_wifi {
+            ui.label(RichText::new(if online { "No Wi-Fi here; connected by cable." } else { "No Wi-Fi adapter, and not connected." }).color(c(t.muted)));
+        }
+        if let Some(b) = &st.busy { ui.label(RichText::new(b).color(c(t.muted)).size(12.0)); }
+        if let Some(e) = &st.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+        ui.add_space(4.0);
+        let mut action: Option<net::NetCmd> = None;
+        let mut open_join: Option<String> = None;
+        egui::ScrollArea::vertical().max_height(300.0).auto_shrink([false, true]).show(ui, |ui| {
+            if st.wifi_on == Some(false) { ui.label(RichText::new("Wi-Fi is off.").color(c(t.muted))); return }
+            for n in &st.networks {
+                ui.horizontal(|ui| {
+                    // Signal bars.
+                    let (r, _) = ui.allocate_exact_size(vec2(18.0, 16.0), Sense::hover());
+                    let lit = ronin_core::wifi::bars(n.quality);
+                    for i in 0..4u8 {
+                        let h = 4.0 + f32::from(i) * 3.5;
+                        let bar = Rect::from_min_size(egui::pos2(r.left() + f32::from(i) * 4.5, r.bottom() - h), vec2(3.0, h));
+                        ui.painter().rect_filled(bar, 1.0, if i < lit.max(1) { c(t.fg) } else { c(t.surface) });
+                    }
+                    let name = RichText::new(&n.ssid).strong();
+                    ui.label(if n.connected { name.color(c(t.accent)) } else { name });
+                    if n.security != ronin_core::wifi::Security::Open { ui.label(RichText::new("secured").color(c(t.muted)).size(11.0)); }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if n.connected {
+                            if ui.small_button("disconnect").clicked() { action = Some(net::NetCmd::Disconnect); }
+                        } else if n.security == ronin_core::wifi::Security::Other && !n.known {
+                            if ui.small_button("in Windows").clicked() { sys::open_settings("network-wifi"); }
+                        } else if ui.small_button("connect").clicked() {
+                            if n.known || n.security == ronin_core::wifi::Security::Open {
+                                action = Some(net::NetCmd::Connect { ssid: n.ssid.clone(), password: String::new() });
+                            } else {
+                                open_join = Some(n.ssid.clone());
+                            }
+                        }
+                    });
+                });
+                // Password box under a new secured network.
+                if self.joining.as_ref().map(|(s, _)| s == &n.ssid).unwrap_or(false) {
+                    let mut go = false;
+                    ui.horizontal(|ui| {
+                        if let Some((_, pw)) = self.joining.as_mut() {
+                            let r = ui.add(egui::TextEdit::singleline(pw).password(true).hint_text("password").desired_width(200.0));
+                            r.request_focus();
+                            go = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        }
+                        if ui.small_button("join").clicked() { go = true; }
+                        if ui.small_button("cancel").clicked() { self.joining = None; }
+                    });
+                    if go {
+                        if let Some((ssid, pw)) = self.joining.take() {
+                            if ronin_core::wifi::valid_password(n.security, &pw) { action = Some(net::NetCmd::Connect { ssid, password: pw }); }
+                            else { self.joining = Some((ssid, pw)); }
+                        }
+                    }
+                }
+                ui.add_space(2.0);
+            }
+            if st.networks.is_empty() && !st.no_wifi { ui.label(RichText::new("Looking for networks…").color(c(t.muted))); }
+        });
+        if let Some(ssid) = open_join { self.joining = Some((ssid, String::new())); }
+        if let Some(a) = action { let _ = self.net_tx.send(a); }
+        ui.separator();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Bluetooth").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                match st.bluetooth_on {
+                    Some(on) => { if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: true, on: !on }); } }
+                    None => { ui.label(RichText::new("none").color(c(t.muted)).size(12.0)); }
+                }
+                if ui.add(egui::Button::new(RichText::new("devices").size(12.0).color(c(t.muted))).frame(false)).clicked() { sys::open_settings("bluetooth"); }
+            });
+        });
+        self.settings_link(ui, "Network settings", "network-status");
     }
 
     fn pop_battery(&mut self, ui: &mut egui::Ui) {
@@ -955,7 +1067,7 @@ impl eframe::App for Bar {
             if close { self.panel = false; }
         }
         if let Some(p) = self.popup {
-            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0) };
+            let (w, h) = match p { Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0), Popup::Network => (360.0, 470.0) };
             let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
             let builder = egui::ViewportBuilder::default()
                 .with_title(POPUP_TITLE)
@@ -967,7 +1079,7 @@ impl eframe::App for Bar {
                 let t = self.theme();
                 egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
-                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui) }
+                    match p { Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui) }
                 });
                 // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
                 ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
