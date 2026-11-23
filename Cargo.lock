@@ -1837,6 +1837,7 @@ dependencies = [
  "ureq",
  "windows",
  "windows-collections",
+ "windows-future",
  "winreg 0.55.0",
 ]
 

@@ -10,6 +10,7 @@ use windows::core::{Interface, GUID, HSTRING};
 use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind, DevicePairingResultStatus, DeviceUnpairingResultStatus};
 use windows::Foundation::IReference;
 use windows_collections::IIterable;
+use crate::winrt::{spawn, wait};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Device {
@@ -39,8 +40,8 @@ pub enum BtCmd { Refresh, Scan, Connect(String), Disconnect(String), Pair(String
 pub fn start(wake: eframe::egui::Context) -> (Arc<Mutex<BtState>>, Sender<BtCmd>) {
     let state = Arc::new(Mutex::new(BtState::default()));
     let (tx, rx) = channel();
-    let s = state.clone();
-    std::thread::spawn(move || run(s, rx, wake));
+    let (s, again) = (state.clone(), tx.clone());
+    std::thread::spawn(move || run(s, rx, again, wake));
     (state, tx)
 }
 
@@ -52,12 +53,14 @@ const ADDRESS: &str = "System.Devices.Aep.DeviceAddress";
 const BT_AUDIO: GUID = GUID::from_u128(0x7fa06c40_b8f6_4c7e_8556_e8c33a12e54d);
 
 /// Bluetooth devices Windows knows, paired or not.
-fn find(paired: bool) -> Option<Vec<Device>> {
+fn find(paired: bool) -> Result<Vec<Device>, String> {
     let aqs = HSTRING::from(format!(
         "(System.Devices.Aep.ProtocolId:=\"{CLASSIC}\" OR System.Devices.Aep.ProtocolId:=\"{LOW_ENERGY}\") AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#{}",
         if paired { "True" } else { "False" }));
     let props = IIterable::<HSTRING>::from(vec![HSTRING::from(CONNECTED), HSTRING::from(ADDRESS)]);
-    let list = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::AssociationEndpoint).ok()?.join().ok()?;
+    // Paired devices come back at once; a search for new ones listens for a while.
+    let limit = Duration::from_secs(if paired { 8 } else { 30 });
+    let list = wait(DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::AssociationEndpoint), limit)?;
     let mut out: Vec<Device> = Vec::new();
     for d in list {
         let name = d.Name().map(|n| n.to_string()).unwrap_or_default();
@@ -75,7 +78,7 @@ fn find(paired: bool) -> Option<Vec<Device>> {
         if out.len() >= 60 { break }
     }
     out.sort_by_key(|d| (!d.connected, d.name.to_lowercase()));
-    Some(out)
+    Ok(out)
 }
 
 /// The audio driver controls of every Bluetooth headphone, speaker and headset (connected or
@@ -121,9 +124,9 @@ fn audio_connect(addr: &str, connect: bool) -> Result<(), String> {
 }
 
 fn pair(id: &str) -> Result<(), String> {
-    let d = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id)).and_then(|a| a.join()).map_err(|e| e.message())?;
+    let d = wait(DeviceInformation::CreateFromIdAsync(&HSTRING::from(id)), Duration::from_secs(8))?;
     // Windows shows its own prompt if the device asks for a PIN or a confirmation.
-    let r = d.Pairing().and_then(|p| p.PairAsync()).and_then(|a| a.join()).map_err(|e| e.message())?;
+    let r = wait(d.Pairing().and_then(|p| p.PairAsync()), Duration::from_secs(60))?;
     match r.Status() {
         Ok(DevicePairingResultStatus::Paired) | Ok(DevicePairingResultStatus::AlreadyPaired) => Ok(()),
         Ok(s) => Err(format!("Pairing did not finish (code {}). Put the device in pairing mode and try again.", s.0)),
@@ -132,8 +135,8 @@ fn pair(id: &str) -> Result<(), String> {
 }
 
 fn forget(id: &str) -> Result<(), String> {
-    let d = DeviceInformation::CreateFromIdAsync(&HSTRING::from(id)).and_then(|a| a.join()).map_err(|e| e.message())?;
-    let r = d.Pairing().and_then(|p| p.UnpairAsync()).and_then(|a| a.join()).map_err(|e| e.message())?;
+    let d = wait(DeviceInformation::CreateFromIdAsync(&HSTRING::from(id)), Duration::from_secs(8))?;
+    let r = wait(d.Pairing().and_then(|p| p.UnpairAsync()), Duration::from_secs(15))?;
     match r.Status() {
         Ok(DeviceUnpairingResultStatus::Unpaired) | Ok(DeviceUnpairingResultStatus::AlreadyUnpaired) => Ok(()),
         _ => Err("Windows could not remove the device".into()),
@@ -142,16 +145,21 @@ fn forget(id: &str) -> Result<(), String> {
 
 enum Kind { Connect, Other }
 
-fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, wake: eframe::egui::Context) {
+fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, again: Sender<BtCmd>, wake: eframe::egui::Context) {
     crate::sys::com_init_mta();
     let set = |f: &dyn Fn(&mut BtState)| { if let Ok(mut s) = state.lock() { f(&mut s); } wake.request_repaint(); };
     let refresh = || {
         let audio: Vec<String> = audio_controls().into_iter().map(|(id, _)| id).collect();
-        let mut list = find(true).unwrap_or_default();
-        for d in &mut list { d.audio = d.addr.as_deref().map(|a| audio.iter().any(|id| rules::id_has_address(id, a))).unwrap_or(false); }
-        set(&|s| s.paired = Some(list.clone()));
+        match find(true) {
+            Ok(mut list) => {
+                for d in &mut list { d.audio = d.addr.as_deref().map(|a| audio.iter().any(|id| rules::id_has_address(id, a))).unwrap_or(false); }
+                set(&|s| s.paired = Some(list.clone()));
+            }
+            Err(e) => set(&|s| { if s.paired.is_none() { s.paired = Some(Vec::new()); } s.error = Some(format!("Could not read your devices ({e}). Press refresh.")); }),
+        }
     };
     let mut later: Vec<Instant> = Vec::new();
+    let mut last_read = Instant::now() - Duration::from_secs(60);
     loop {
         let wait = later.iter().min().map(|t| t.saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(3600));
         let cmd = match rx.recv_timeout(wait.max(Duration::from_millis(30))) {
@@ -162,16 +170,21 @@ fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, wake: eframe::egui::Cont
         let cmd_kind = match &cmd { Some(BtCmd::Connect(_)) => Kind::Connect, _ => Kind::Other };
         let soon = |ms: &[u64]| ms.iter().map(|m| Instant::now() + Duration::from_millis(*m)).collect::<Vec<_>>();
         match cmd {
-            Some(BtCmd::Refresh) => { set(&|s| s.error = None); refresh(); }
+            Some(BtCmd::Refresh) => {
+                // Several opens in a row need only one read.
+                if last_read.elapsed() > Duration::from_millis(1500) { set(&|s| s.error = None); refresh(); last_read = Instant::now(); }
+            }
             Some(BtCmd::Scan) => {
                 if state.lock().map(|s| s.scanning).unwrap_or(true) { continue }
                 set(&|s| { s.scanning = true; s.error = None; });
                 // Searching takes several seconds; it runs beside this thread so the buttons keep working.
                 let (st, wk) = (state.clone(), wake.clone());
-                std::thread::spawn(move || {
-                    crate::sys::com_init_mta();
-                    let found = find(false).unwrap_or_default();
-                    if let Ok(mut s) = st.lock() { s.nearby = Some(found); s.scanning = false; }
+                spawn(move || {
+                    let found = find(false);
+                    if let Ok(mut s) = st.lock() {
+                        s.scanning = false;
+                        match found { Ok(l) => s.nearby = Some(l), Err(e) => { s.nearby.get_or_insert_with(Vec::new); s.error = Some(format!("Search stopped: {e}")); } }
+                    }
                     wk.request_repaint();
                 });
             }
@@ -184,9 +197,18 @@ fn run(state: Arc<Mutex<BtState>>, rx: Receiver<BtCmd>, wake: eframe::egui::Cont
             }
             Some(BtCmd::Pair(id)) => {
                 set(&|s| { s.busy = Some("Pairing… (accept on the device if it asks)".into()); s.error = None; });
-                let r = pair(&id);
-                set(&|s| { s.busy = None; s.error = r.clone().err(); if r.is_ok() { if let Some(n) = s.nearby.as_mut() { n.retain(|d| d.id != id); } } });
-                later.extend(soon(&[300, 2500, 6000]));
+                // Pairing waits for the person (a PIN or a button on the device): its own thread.
+                let (st, wk, tx) = (state.clone(), wake.clone(), again.clone());
+                spawn(move || {
+                    let r = pair(&id);
+                    if let Ok(mut s) = st.lock() {
+                        s.busy = None;
+                        s.error = r.clone().err();
+                        if r.is_ok() { if let Some(n) = s.nearby.as_mut() { n.retain(|d| d.id != id); } }
+                    }
+                    wk.request_repaint();
+                    let _ = tx.send(BtCmd::Refresh);
+                });
             }
             Some(BtCmd::Forget(id)) => {
                 let r = forget(&id);

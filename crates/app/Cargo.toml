@@ -23,6 +23,7 @@ ureq = { version = "3", default-features = false, features = ["native-tls"] }
 winreg = "0.55"
 sha2 = { version = "0.10", default-features = false }
 windows-collections = "0.3"
+windows-future = "0.3"
 windows = { version = "0.62", features = [
   "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Com",
   "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Power", "Win32_System_SystemInformation",
