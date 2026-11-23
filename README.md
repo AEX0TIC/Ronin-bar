@@ -27,6 +27,7 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 - [The bar](#the-bar)
 - [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)
 - [Quick settings](#quick-settings)
+- [Always in sync with Windows](#always-in-sync-with-windows)
 - [Launcher, calendar and the other popups](#launcher-calendar-and-the-other-popups)
 - [Wallpapers](#wallpapers)
 - [Themes](#themes)
@@ -35,12 +36,14 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 - [Install](#install) · [Uninstall](#uninstall) · [Troubleshooting](#troubleshooting)
 - [Privacy and safety](#privacy-and-safety)
 - [Build from source](#build-from-source)
+- [Version history](#version-history)
 
 ---
 
 ## The bar
 
 <p align="center"><img src="docs/images/bar-map.png" alt="The Ronin bar with numbered parts"></p>
+<p align="center"><sub>Picture from an earlier version: since 0.5.1, part 5 is three icons (Wi-Fi, Bluetooth and quick settings) and part 8 has no Apps button.</sub></p>
 
 | # | Part | Click | Also |
 |---|---|---|---|
@@ -48,13 +51,17 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 | 2 | **Dock** | Pinned apps open; open windows come to the front, or minimise if already in front | Right-click a pinned app to unpin it, or an open window to pin its app. Middle-click closes a window. A line marks the window in front; dimmed means minimised |
 | 3 | **Clock** | **Calendar**: today, a month view, and previous/next month | |
 | 4 | **CPU · RAM** | Task Manager | Live usage |
-| 5 | **Wi-Fi · Bluetooth · quick settings** | Three icons, each with its own popup: **Wi-Fi**, **Bluetooth** (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)) and **quick settings** | Wi-Fi dims when you're offline; Bluetooth dims when it's off |
+| 5 | **Wi-Fi · Bluetooth · quick settings** | Three icons, each with its own popup: **Wi-Fi**, **Bluetooth** (see [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)) and **quick settings** | Hover Wi-Fi for the network and its signal. Wi-Fi dims when you're offline; Bluetooth dims when it's off |
 | 6 | **Battery** | **Battery**: charge, time left, battery saver, brightness | A bolt while charging |
 | 7 | **Sound** | **Sound**: volume slider and mute | Scroll to change the volume, right-click to mute |
 | 8 | **Wallpapers · themes · settings** | Opens that page of the Ronin panel | Right-click wallpapers for the next one |
 | 9 | **Power** | **Power menu**: lock, sleep, sign out, restart, shut down | Asks before anything except lock |
 
-Each open window shows its own app icon. That includes Store apps such as Settings, Calculator and Photos, which the bar looks up by their app ID. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
+Each open window shows its own app's icon and name (hover to see it), even when the app runs inside another program:
+- Store apps such as Settings, Calculator and Photos;
+- web apps installed from Edge or Chrome, such as Netflix or YouTube Music, instead of the browser's icon.
+
+The bar matches each window to the app Windows has it registered as. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
 The bar steps aside while a fullscreen game or video is in front, and comes back after it.
 
@@ -88,6 +95,22 @@ Click the quick-settings icon (two switches), next to Wi-Fi and Bluetooth: 3 til
 | **Screen snip** | Take a screenshot of part of the screen |
 
 Below the tiles are **brightness** and **volume** sliders, your battery, Ronin settings and the power menu.
+
+## Always in sync with Windows
+
+Ronin Bar doesn't keep its own copy of your settings that could drift. It follows what Windows reports, as it happens:
+
+| What | How quickly it updates |
+|---|---|
+| **Wi-Fi** | The moment Windows reports a change: a scan finishing, connecting, disconnecting, signal changing, Wi-Fi switched on or off. The connected network is read directly from Windows |
+| **Wi-Fi and Bluetooth switches** | As soon as either is switched, whether from Ronin, Windows Settings, or the airplane key on your keyboard |
+| **Bluetooth devices** | Every few seconds while the popup is open, so headphones connecting or disconnecting show up by themselves |
+| **Volume** | Five times a second, so volume keys and other apps' changes show up straight away |
+| **Battery, CPU, memory** | Every second |
+| **Brightness** | Every few seconds, and straight away when you move the slider |
+| **Airplane mode, hotspot** | Each time quick settings opens |
+
+When you click a switch, the popup shows the new state at once, then confirms it with Windows. If Windows is slow or doesn't answer, Ronin gives up after a few seconds and tells you, instead of freezing.
 
 ## Launcher, calendar and the other popups
 
@@ -169,6 +192,8 @@ Use **Settings → Apps → Ronin Bar → Uninstall**, or ⚙ **→ Uninstall** 
 | A window's buttons are under the bar | Maximise the window again; Ronin keeps the top strip free, but a few apps place themselves |
 | Bluetooth headphones won't connect | Make sure they're on and not connected to another device (a phone), then press **connect** again. Still nothing: **forget** them and **pair** them again |
 | A new device isn't found | Put it in pairing mode (usually by holding its power or Bluetooth button) and press **search again** |
+| "Windows did not answer in time" | Windows was busy (often just after waking from sleep). Press **refresh**, or open the popup again a few seconds later |
+| The Wi-Fi icon looks offline but the internet works | Hover it: Ronin shows what Windows reports. If it says *Not connected*, open the Wi-Fi popup to have it read again |
 | An app shows the wrong icon | Hover it to see its name, and [open an issue](https://github.com/AEX0TIC/Ronin-bar/issues) with that name |
 | No update popup | ⚙ → Settings → Updates → **Check for updates**; check that *Tell me when a new version is out* is ticked |
 | No wallpapers download | They need internet access to wallhaven.cc and github.com |
@@ -192,10 +217,25 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Folder | What's inside |
 |---|---|
-| `crates/core` | Themes, settings, the drawn wallpapers, night light, the calendar, Wi-Fi rules, pins, the wallpaper catalogue and update checks. Tested on any OS, with no `unsafe` code |
-| `crates/app` | The Windows program: the bar, popups, dock, quick settings, downloads, the updater and the installer |
+| `crates/core` | Themes, settings, the drawn wallpapers, night light, the calendar, Wi-Fi and Bluetooth rules, pins, the wallpaper catalogue and update checks. Tested on any OS, with no `unsafe` code |
+| `crates/app` | The Windows program: the bar, popups, dock, Wi-Fi (`net.rs`), Bluetooth (`bt.rs`), quick settings, downloads, the updater and the installer |
 
 **Publishing a release:** raise `version` in `Cargo.toml`, merge to `main`, then run **Actions → release**. Installed copies pick it up through the [updater](#updates).
+
+## Version history
+
+| Version | What changed |
+|---|---|
+| **0.6.1** | Wi-Fi, Bluetooth and quick settings never freeze (slow Windows calls get a time limit); everything follows Windows live: change reports, radio switches, volume keys |
+| **0.6.0** | Bluetooth popup works like Wi-Fi: connect / disconnect, search, pair, forget |
+| **0.5.1** | Separate Wi-Fi, Bluetooth and quick-settings icons; **Pin** / **Unpin** in the launcher; a simpler Ronin panel; web apps like Netflix show their own icon |
+| **0.5.0** | In-app updates with a "New version available" popup; a new README |
+| **0.4.0** | Ronin's own popups instead of Windows' flyouts: launcher, calendar, sound, battery with brightness, Wi-Fi, power, quick settings; real icons for Store apps; faster popups |
+| **0.3.0** | Wallpaper previews fixed; 1,363 more wallpapers in 15 categories; 4 new themes (9 in all) |
+| **0.2.x** | The bar moves to the top and replaces the taskbar, with windows below it like a Linux desktop; the Ronin logo; every setting on the bar; Quit and Uninstall fixed |
+| **0.1.0** | First release: the dock, wallpapers and themes |
+
+Every release, with its download and SHA-256, is on the [Releases](https://github.com/AEX0TIC/Ronin-bar/releases) page.
 
 ## Licence
 
