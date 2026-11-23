@@ -5,11 +5,18 @@
 /// links, driver helpers, setup and registration tools.
 pub fn is_junk(name: &str, target: &str) -> bool {
     let n = name.to_lowercase();
-    const WORDS: [&str; 28] = [
+    const WORDS: &[&str] = &[
         "uninstall", "readme", "read me", "release notes", "help", "documentation", "manual", "user guide",
         "license", "licence", "website", "web site", "homepage", "home page", "changelog", "what's new",
-        "add a new", "virtual network adapter", "registration", "product registration", "repair", "setup",
+        "add a new", "virtual network adapter", "registration", "repair", "setup", "installer",
         "configuration tool", "check for updates", "safe mode", "support center", "eula", "faq",
+        // Command lines and Windows' admin and developer tools.
+        "command prompt", "powershell", "native tools", "cross tools", "developer prompt", "verifier",
+        "administration assistant", "administrative tools", "windows tools", "defragment", "disk cleanup",
+        "event viewer", "system configuration", "system information", "registry editor", "task scheduler",
+        "performance monitor", "resource monitor", "recovery drive", "odbc", "iscsi", "memory diagnostic",
+        "print management", "component services", "computer management", "local security policy",
+        "steps recorder", "debuggable package", "debugger", "profiler", "sdk tools", "symbol",
     ];
     if WORDS.iter().any(|w| n.contains(w)) { return true }
     // A target that is a document, a web page, a script or an admin console.
@@ -21,6 +28,31 @@ pub fn is_junk(name: &str, target: &str) -> bool {
     if ENDS.iter().any(|e| t.ends_with(e)) { return true }
     // Web links, except game launchers (Steam, Epic and the like use links too).
     t.ends_with(".url") && (n.contains("web") || n.contains("online") || n.contains("site"))
+}
+
+/// Windows' own folder ids (System32, its 32-bit twin, and Windows) as Windows' Applications
+/// folder writes them at the start of a program's id.
+const WINDOWS_FOLDERS: [&str; 3] = ["{1ac14e77-02e7-4e5d-b744-2eb1ae5198b7}", "{d65231b0-b2f1-4857-a4ce-a8e7c6ea7d27}", "{f38bf404-1d43-42f2-9305-67de0b28fc23}"];
+/// The few programs inside Windows' own folders that people do open.
+const WINDOWS_KEEP: [&str; 4] = ["notepad.exe", "mspaint.exe", "calc.exe", "snippingtool.exe"];
+
+/// A program from Windows' own system folders (cmd, consoles, diagnostics), not an app.
+pub fn is_system_tool(id: &str) -> bool {
+    let l = id.to_ascii_lowercase();
+    let l = l.strip_prefix("shell:appsfolder\\").unwrap_or(&l);
+    let inside = WINDOWS_FOLDERS.iter().any(|f| l.starts_with(f))
+        || l.starts_with(r"c:\windows\system32\") || l.starts_with(r"c:\windows\syswow64\");
+    inside && !WINDOWS_KEEP.iter().any(|k| l.ends_with(k))
+}
+
+/// A desktop `.url` that starts a program (a game launcher's own link such as steam:// or
+/// com.epicgames.launcher://), not a web page or a file.
+pub fn is_launcher_link(url: &str) -> bool {
+    let Some((scheme, rest)) = url.trim().split_once(':') else { return false };
+    let s = scheme.to_ascii_lowercase();
+    !rest.is_empty() && s.len() >= 2 && s.len() <= 40
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')
+        && !["http", "https", "ftp", "file", "mailto", "javascript", "data", "ms-settings", "about"].contains(&s.as_str())
 }
 
 /// Same app under two names ("7-Zip 23.01 (x64)" and "7-Zip"): lowercase, without versions,
@@ -84,6 +116,22 @@ mod tests {
         for (n, t) in [("Visual Studio Code", r"x\Code.exe"), ("Counter-Strike 2", r"x\Counter-Strike 2.url"),
                        ("Calculator", "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"), ("Brave", r"x\brave.exe")] {
             assert!(!is_junk(n, t), "{n}");
+        }
+    }
+
+    #[test]
+    fn system_tools_and_links() {
+        assert!(is_system_tool(r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe"));
+        assert!(is_system_tool(r"C:\Windows\System32\dfrgui.exe"));
+        assert!(!is_system_tool(r"shell:AppsFolder\{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\notepad.exe"));
+        assert!(!is_system_tool(r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe"));
+        for bad in ["Developer Command Prompt for VS 2019", "Windows PowerShell ISE", "Application Verifier (X64)", "Defragment and Optimize Drives", "MinGW Installer"] {
+            assert!(is_junk(bad, "x.exe"), "{bad}");
+        }
+        assert!(is_launcher_link("steam://rungameid/2669320"));
+        assert!(is_launcher_link("com.epicgames.launcher://apps/Fortnite?action=launch"));
+        for bad in ["https://example.com", "http://x", "file:///C:/a.pdf", "mailto:a@b.c", "javascript:alert(1)", "", "nocolon"] {
+            assert!(!is_launcher_link(bad), "{bad}");
         }
     }
 

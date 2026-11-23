@@ -117,9 +117,10 @@ When you click a switch, the popup shows the new state at once, then confirms it
 Each popup opens under the item you clicked, in your theme. It closes with **Esc**, with a click anywhere else, or with another click on the same item.
 
 - **Launcher** (Ronin mark): every app you can open, with real icons.
-  - **What's listed:** Store apps, Start-menu apps, and programs that never added a Start-menu entry (found in Windows' list of installed software). Uninstallers, manuals, web links, setup tools and driver helpers are left out.
+  - **What's listed:** software only. That means Store apps, Start-menu apps, programs and game launchers on your desktop (Steam, Epic, EA, Riot and the like), and programs that never added a Start-menu entry (found in Windows' list of installed software or their install folder).
+  - **What's left out:** shortcuts to files, videos, documents and folders; uninstallers, manuals, web links, setup tools and driver helpers; Command Prompt, PowerShell and Windows' admin and developer tools.
   - **At the top:** **Pinned** (the small **×** unpins) and **Most used**, the apps you open most often.
-  - **Search** matches the start of a name, any word in it, or its initials (`vsc` finds Visual Studio Code). Use **↑ ↓** to choose and **Enter** to open.
+  - **Search** matches the start of a name, any word in it, or its initials (`vsc` finds Visual Studio Code). The arrow keys choose and **Enter** opens.
   - **Each app** has a **Pin** / **Unpin** button. Right-click it to **pin**, **hide it from the launcher**, or **show it in its folder**. **show hidden** brings hidden apps back.
 - **Calendar** (clock): a large clock, today's date, and a month view with today marked.
 - **Sound**, **Battery** and **Power**: see [the bar](#the-bar).
@@ -230,6 +231,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.7.1** | The launcher lists only software: programs and game launchers from your desktop are added (not files, videos or documents), apps like DaVinci Resolve are found through their install folder, Command Prompt, PowerShell and Windows' admin tools are gone, and so is the power button |
 | **0.7.0** | A cleaner, easier launcher: only real apps (helpers, links and manuals left out), programs without a Start-menu entry added, Most used, smarter search with initials, arrow keys, and a right-click menu to pin, hide or show in folder |
 | **0.6.2** | Bluetooth without lag: Windows reports each device change instead of Ronin asking again and again; search stops by itself and never shows while Bluetooth is off; Wi-Fi and Bluetooth switches react instantly; the launcher is just apps and power |
 | **0.6.1** | Wi-Fi, Bluetooth and quick settings never freeze (slow Windows calls get a time limit); everything follows Windows live: change reports, radio switches, volume keys |
