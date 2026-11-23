@@ -204,13 +204,61 @@ pub fn all_apps() -> Vec<(String, String)> {
             });
             let (Some(name), Some(id)) = (text(SIGDN_NORMALDISPLAY), text(SIGDN_PARENTRELATIVEPARSING)) else { continue };
             let target = format!("{}{id}", dock::APP_PREFIX);
-            if name.trim().is_empty() || dock::is_clutter(&name) || !dock::is_app_id(&target) { continue }
+            if name.trim().is_empty() || dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &id) || !dock::is_app_id(&target) { continue }
             if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) { out.push((name, target)); }
             if out.len() > 2000 { break }
         }
     }
+    // Programs installed without a Start-menu entry, from Windows' own list of installed software.
+    let known: Vec<String> = out.iter().map(|(n, _)| ronin_core::launcher::simple_name(n)).collect();
+    let ids: Vec<String> = out.iter().map(|(_, id)| id.to_ascii_lowercase()).collect();
+    for (name, exe) in installed_programs() {
+        let simple = ronin_core::launcher::simple_name(&name);
+        let file = exe.rsplit('\\').next().unwrap_or(&exe).to_ascii_lowercase();
+        if simple.is_empty() || known.contains(&simple) || ids.iter().any(|i| i.ends_with(&format!("\\{file}"))) { continue }
+        if out.iter().any(|(_, p)| p.eq_ignore_ascii_case(&exe)) { continue }
+        out.push((name, exe));
+    }
     out.sort_by_key(|(n, _)| n.to_lowercase());
     out
+}
+
+/// Installed software as Windows lists it in Settings → Apps (your account's and the PC's),
+/// each with its program file. Only entries that name a program that really exists are used;
+/// uninstallers, setup tools, updates and parts of Windows are left out.
+fn installed_programs() -> Vec<(String, String)> {
+    use winreg::{enums::*, RegKey};
+    const KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall";
+    const KEY32: &str = r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall";
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (root, path) in [(HKEY_CURRENT_USER, KEY), (HKEY_LOCAL_MACHINE, KEY), (HKEY_LOCAL_MACHINE, KEY32)] {
+        let Ok(k) = RegKey::predef(root).open_subkey(path) else { continue };
+        for sub in k.enum_keys().flatten().take(2000) {
+            let Ok(e) = k.open_subkey(&sub) else { continue };
+            let name: String = e.get_value("DisplayName").unwrap_or_default();
+            let name = name.trim().to_string();
+            if name.is_empty() || name.len() > 120 { continue }
+            // Parts of Windows, updates and add-ons are not apps of their own.
+            if e.get_value::<u32, _>("SystemComponent").unwrap_or(0) == 1 { continue }
+            if e.get_value::<String, _>("ParentKeyName").is_ok() || e.get_value::<String, _>("ReleaseType").is_ok() { continue }
+            let icon: String = e.get_value("DisplayIcon").unwrap_or_default();
+            // "C:\x\app.exe,0" or "\"C:\x\app.exe\"" → C:\x\app.exe
+            let exe = icon.trim().trim_matches('"').rsplit_once(',').map(|(p, i)| if i.trim().parse::<i32>().is_ok() { p } else { icon.trim() }).unwrap_or(icon.trim()).trim_matches('"').trim().to_string();
+            let file = exe.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
+            if !file.ends_with(".exe") || ["unins", "uninst", "setup", "install", "update", "helper", "crash", "elevat"].iter().any(|w| file.contains(w)) { continue }
+            if !dock::pinnable(&exe) || !Path::new(&exe).is_file() { continue }
+            if dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &exe) { continue }
+            if !out.iter().any(|(n, p)| n.eq_ignore_ascii_case(&name) || p.eq_ignore_ascii_case(&exe)) { out.push((name, exe)); }
+        }
+    }
+    out
+}
+
+/// Shows a program in File Explorer, selected.
+pub fn show_in_folder(path: &str) {
+    if !dock::pinnable(path) || dock::is_app_id(path) || !Path::new(path).exists() { return }
+    let args = HSTRING::from(format!("/select,\"{path}\""));
+    unsafe { let _ = ShellExecuteW(None, w!("open"), w!("explorer.exe"), &args, None, SW_SHOWNORMAL); }
 }
 
 /// An installed app's icon (from Windows' Applications folder), as premultiplied RGBA.

@@ -35,13 +35,16 @@ pub struct Settings {
     /// Show a popup when a new version is released, and install new versions without asking.
     pub update_popup: bool,
     pub auto_update: bool,
+    /// Apps hidden from the launcher, and how often each app was opened from it.
+    pub hidden_apps: Vec<String>,
+    pub launch_counts: Vec<(String, u32)>,
     /// Filled once, the first time Ronin Bar changes anything.
     pub original: Option<Original>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
     }
 }
 
@@ -56,6 +59,10 @@ impl Settings {
         if !AUTO_CHANGE_CHOICES.contains(&s.auto_change_minutes) { s.auto_change_minutes = 0; }
         if !crate::wallhaven::is_id(&s.wallpaper) { s.wallpaper.clear(); }
         if !(10..=100).contains(&s.night_strength) { s.night_strength = crate::night::DEFAULT_STRENGTH; }
+        s.hidden_apps.retain(|a| crate::dock::pinnable(a));
+        s.hidden_apps.truncate(500);
+        s.launch_counts.retain(|(a, _)| crate::dock::pinnable(a));
+        s.launch_counts.truncate(200);
         s.pinned = crate::dock::clean_pins(std::mem::take(&mut s.pinned));
         s
     }
