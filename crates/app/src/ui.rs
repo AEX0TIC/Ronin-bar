@@ -366,6 +366,22 @@ impl Bar {
         }
     }
 
+    /// Follows the screen's scale and size while the bar runs (Settings → Display → Scale, a
+    /// monitor plugged in or out): the bar's height in pixels, its reserved strip, and where the
+    /// popups and the panel open.
+    fn follow_screen(&mut self, ctx: &egui::Context) {
+        let Some(h) = self.hwnd else { return };
+        let ppp = ctx.pixels_per_point();
+        let (w, _, _) = sys::primary_screen();
+        let sw = w as f32 / ppp;
+        if (sw - self.screen_w).abs() > 0.5 { self.screen_w = sw; }
+        let px = (BAR_HEIGHT * ppp).round() as i32;
+        if px != self.bar_px && px > 0 {
+            self.bar_px = px;
+            sys::appbar_resize(h, px);
+        }
+    }
+
     fn tick(&mut self) {
         let done = self.fetched.lock().ok().and_then(|mut d| d.take());
         if let Some((id, r)) = done {
@@ -1785,6 +1801,7 @@ impl eframe::App for Bar {
         // Background threads wake the bar when something changes; this only keeps the clock going.
         ctx.request_repaint_after(Duration::from_millis(if self.popup.is_some() { 250 } else { 1000 }));
         self.dock(&ctx);
+        if self.guard_at.elapsed() >= Duration::from_secs(1) { self.follow_screen(&ctx); }
         self.tick();
         egui::Frame::new().fill(c(self.theme().bg)).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
