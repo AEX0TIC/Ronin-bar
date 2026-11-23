@@ -1463,13 +1463,11 @@ impl Bar {
                 if resp.clicked() { self.panel = false; }
             });
         });
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for (label, tab) in [("Wallpapers", Tab::Wallpapers), ("Themes", Tab::Themes), ("Settings", Tab::Settings)] {
-                if ui.selectable_label(self.tab == tab, label).clicked() { self.tab = tab; self.confirm = None; }
-            }
-        });
+        // Each page has its own button on the bar (picture, half circle, gear), so the panel shows
+        // just that page, with its name, instead of a row of tabs repeating those buttons.
+        ui.add_space(6.0);
+        let title = match self.tab { Tab::Wallpapers => "Wallpapers", Tab::Themes => "Themes", Tab::Settings => "Settings" };
+        ui.label(RichText::new(title).strong().size(17.0).color(c(t.accent)));
         ui.separator();
         match self.tab {
             Tab::Wallpapers => self.tab_wallpapers(ui),
