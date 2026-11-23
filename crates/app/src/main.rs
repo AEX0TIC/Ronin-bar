@@ -5,6 +5,7 @@
 //! adds itself to Settings → Apps and the Start menu, and starts with Windows.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(windows)] mod bt;
 #[cfg(windows)] mod dock;
 #[cfg(windows)] mod download;
 #[cfg(windows)] mod glyph;
