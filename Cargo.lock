@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "ronin-bar"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -1843,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "ronin-core"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "serde",
  "serde_json",
