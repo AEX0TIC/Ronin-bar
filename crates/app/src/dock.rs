@@ -204,14 +204,23 @@ pub fn all_apps() -> Vec<(String, String)> {
             });
             let (Some(name), Some(id)) = (text(SIGDN_NORMALDISPLAY), text(SIGDN_PARENTRELATIVEPARSING)) else { continue };
             let target = format!("{}{id}", dock::APP_PREFIX);
-            if name.trim().is_empty() || dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &id) || !dock::is_app_id(&target) { continue }
+            if name.trim().is_empty() || dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &id) || ronin_core::launcher::is_system_tool(&id) || !dock::is_app_id(&target) { continue }
             if !out.iter().any(|(n, _)| n.eq_ignore_ascii_case(&name)) { out.push((name, target)); }
             if out.len() > 2000 { break }
         }
     }
-    // Programs installed without a Start-menu entry, from Windows' own list of installed software.
-    let known: Vec<String> = out.iter().map(|(n, _)| ronin_core::launcher::simple_name(n)).collect();
+    // Programs on the desktop and programs installed without a Start-menu entry (from Windows'
+    // own list of installed software), each once.
+    let mut known: Vec<String> = out.iter().map(|(n, _)| ronin_core::launcher::simple_name(n)).collect();
     let ids: Vec<String> = out.iter().map(|(_, id)| id.to_ascii_lowercase()).collect();
+    for (name, path, target) in desktop_apps() {
+        let simple = ronin_core::launcher::simple_name(&name);
+        let file = target.rsplit('\\').next().unwrap_or(&target).to_ascii_lowercase();
+        let same_program = !file.is_empty() && file.ends_with(".exe") && ids.iter().any(|i| i.ends_with(&format!("\\{file}")));
+        if simple.is_empty() || known.contains(&simple) || same_program { continue }
+        known.push(simple);
+        out.push((name, path));
+    }
     for (name, exe) in installed_programs() {
         let simple = ronin_core::launcher::simple_name(&name);
         let file = exe.rsplit('\\').next().unwrap_or(&exe).to_ascii_lowercase();
@@ -241,17 +250,92 @@ fn installed_programs() -> Vec<(String, String)> {
             // Parts of Windows, updates and add-ons are not apps of their own.
             if e.get_value::<u32, _>("SystemComponent").unwrap_or(0) == 1 { continue }
             if e.get_value::<String, _>("ParentKeyName").is_ok() || e.get_value::<String, _>("ReleaseType").is_ok() { continue }
-            let icon: String = e.get_value("DisplayIcon").unwrap_or_default();
+            let mut icon: String = e.get_value("DisplayIcon").unwrap_or_default();
+            // No program named: look in the install folder for one whose name fits (DaVinci
+            // Resolve → Resolve.exe).
+            if !icon.to_ascii_lowercase().contains(".exe") {
+                let dir: String = e.get_value("InstallLocation").unwrap_or_default();
+                if let Some(found) = program_in(dir.trim().trim_matches('"'), &name) { icon = found; }
+            }
             // "C:\x\app.exe,0" or "\"C:\x\app.exe\"" → C:\x\app.exe
             let exe = icon.trim().trim_matches('"').rsplit_once(',').map(|(p, i)| if i.trim().parse::<i32>().is_ok() { p } else { icon.trim() }).unwrap_or(icon.trim()).trim_matches('"').trim().to_string();
             let file = exe.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
             if !file.ends_with(".exe") || ["unins", "uninst", "setup", "install", "update", "helper", "crash", "elevat"].iter().any(|w| file.contains(w)) { continue }
             if !dock::pinnable(&exe) || !Path::new(&exe).is_file() { continue }
-            if dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &exe) { continue }
+            if dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &exe) || ronin_core::launcher::is_system_tool(&exe) { continue }
             if !out.iter().any(|(n, p)| n.eq_ignore_ascii_case(&name) || p.eq_ignore_ascii_case(&exe)) { out.push((name, exe)); }
         }
     }
     out
+}
+
+/// A program in `dir` (not in sub-folders) whose file name is part of the app's name.
+fn program_in(dir: &str, name: &str) -> Option<String> {
+    if dir.is_empty() || !dock::pinnable(&format!("{}\\x.exe", dir.trim_end_matches('\\'))) { return None }
+    let want = ronin_core::launcher::simple_name(name).replace(' ', "");
+    let rd = std::fs::read_dir(dir).ok()?;
+    rd.flatten().take(400).map(|e| e.path()).find(|p| {
+        let stem = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")) && stem.len() >= 3 && want.contains(&stem)
+            && !["unins", "setup", "update", "crash", "helper"].iter().any(|w| stem.contains(w))
+    }).map(|p| p.display().to_string())
+}
+
+/// Software on your desktop (yours and the shared one): shortcuts to programs, game-launcher
+/// links (Steam, Epic, EA, Riot…) and programs themselves. Shortcuts to files, videos, documents
+/// and folders are left out. Returns (name, what to open, the program it starts).
+fn desktop_apps() -> Vec<(String, String, String)> {
+    use windows::Win32::UI::Shell::{SHGetKnownFolderPath, FOLDERID_Desktop, FOLDERID_PublicDesktop, KF_FLAG_DEFAULT};
+    let mut out = Vec::new();
+    for id in [FOLDERID_Desktop, FOLDERID_PublicDesktop] {
+        let Ok(p) = (unsafe { SHGetKnownFolderPath(&id, KF_FLAG_DEFAULT, None) }) else { continue };
+        let dir = unsafe { p.to_string().unwrap_or_default() };
+        unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(p.0 as *const _)); }
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten().take(500) {
+            let path = e.path();
+            if !path.is_file() { continue }
+            let s = path.display().to_string();
+            let name = path.file_stem().map(|n| n.to_string_lossy().trim().to_string()).unwrap_or_default();
+            let name = name.strip_suffix(" - Shortcut").unwrap_or(&name).to_string();
+            if name.is_empty() || !dock::pinnable(&s) { continue }
+            let ext = path.extension().map(|x| x.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+            let target = match ext.as_str() {
+                "exe" => s.clone(),
+                "lnk" => match shortcut_target(&s) { Some(t) => t, None => continue },
+                "url" => {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    let url = text.lines().find_map(|l| l.trim().strip_prefix("URL=")).unwrap_or("").to_string();
+                    if !ronin_core::launcher::is_launcher_link(&url) { continue }
+                    String::new()
+                }
+                _ => continue,
+            };
+            if !target.is_empty() {
+                let t = target.to_ascii_lowercase();
+                if !t.ends_with(".exe") || !Path::new(&target).is_file() || ronin_core::launcher::is_system_tool(&target) { continue }
+            }
+            if dock::is_clutter(&name) || ronin_core::launcher::is_junk(&name, &target) { continue }
+            if !out.iter().any(|(n, _, _): &(String, String, String)| n.eq_ignore_ascii_case(&name)) { out.push((name, s, target)); }
+        }
+    }
+    out
+}
+
+/// The file a shortcut opens.
+fn shortcut_target(lnk: &str) -> Option<String> {
+    use windows::core::Interface;
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    unsafe {
+        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        link.cast::<IPersistFile>().ok()?.Load(&HSTRING::from(lnk), STGM_READ).ok()?;
+        let mut buf = [0u16; 520];
+        link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        let t = String::from_utf16_lossy(&buf[..n]);
+        (!t.is_empty()).then_some(t)
+    }
 }
 
 /// Shows a program in File Explorer, selected.

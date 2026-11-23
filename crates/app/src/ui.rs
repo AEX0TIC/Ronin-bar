@@ -824,7 +824,7 @@ impl Bar {
         });
         ui.add_space(6.0);
         let before = self.search.clone();
-        let field = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search apps  ·  ↑ ↓ to choose, Enter to open").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
+        let field = ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search apps  ·  arrow keys to choose, Enter to open").desired_width(f32::INFINITY).margin(vec2(10.0, 8.0)));
         if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
         if self.search != before { self.launcher_sel = 0; }
         let (up, down, enter) = ui.input(|i| (i.key_pressed(egui::Key::ArrowUp), i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::Enter)));
@@ -931,12 +931,6 @@ impl Bar {
         ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Right-click an app to pin, hide or find it").color(c(t.muted)).size(11.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let (r, resp) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-                    if resp.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
-                    glyph::draw(ui.painter(), r.shrink(5.0), Glyph::Power, c(t.accent));
-                    if resp.clicked() { let x = self.screen_w - 160.0; self.confirm = None; self.popup = None; self.toggle_popup(Popup::Power, x); }
-                });
             });
         });
     }
