@@ -9,6 +9,7 @@ pub mod github;
 pub mod night;
 pub mod settings;
 pub mod theme;
+pub mod update;
 pub mod wallhaven;
 pub mod wifi;
 

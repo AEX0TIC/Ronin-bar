@@ -32,13 +32,16 @@ pub struct Settings {
     /// Ronin's night light (a warmer screen), and how strong it is in percent.
     pub night_light: bool,
     pub night_strength: u8,
+    /// Show a popup when a new version is released, and install new versions without asking.
+    pub update_popup: bool,
+    pub auto_update: bool,
     /// Filled once, the first time Ronin Bar changes anything.
     pub original: Option<Original>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, original: None }
     }
 }
 
