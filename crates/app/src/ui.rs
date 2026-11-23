@@ -85,6 +85,8 @@ pub struct Bar {
     /// launcher's search text.
     all_apps: AppList,
     all_apps_at: Instant,
+    /// App ids of open windows the list was already read again for (once each).
+    apps_asked: std::collections::HashSet<String>,
     search: String,
     /// The brightness and volume being dragged, until the slider is let go, and when brightness
     /// was last sent (the screen is asked at most a few times a second).
@@ -177,7 +179,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -351,6 +353,7 @@ impl Bar {
             sys::appbar_register(h, self.bar_px);
             self.hwnd = Some(h);
             self.popup_live = true;   // make the popup window now, hidden, so the first click is instant
+            self.load_apps();         // the list of installed apps also names and draws open windows
             if self.settings.hide_taskbar { self.hide_taskbar(); }
         }
     }
@@ -426,7 +429,20 @@ impl Bar {
 
     /// An open window's icon: its program's, else its installed app's (Store apps), else the icon
     /// the window draws in its own title bar.
+    ///
+    /// The installed app comes first when Windows lists it: many apps run inside another
+    /// program (Netflix and other web apps inside Edge or Chrome, Store apps inside a host), and
+    /// only the app id tells them apart.
     fn win_icon(&mut self, ctx: &egui::Context, w: &dock::Win) -> Option<egui::TextureHandle> {
+        if let Some(a) = w.app.as_deref().filter(|a| self.listed_app(a).is_some()) {
+            if let Some(t) = self.icon(ctx, a) { return Some(t) }
+        }
+        // An app id Windows' list does not have yet (a web app just installed): read the list
+        // again (at most once a minute), and use the program's icon meanwhile.
+        let loaded = self.all_apps.lock().map(|l| l.is_some()).unwrap_or(false);
+        if let (Some(a), true) = (&w.app, loaded) {
+            if self.apps_asked.insert(a.to_ascii_lowercase()) { self.all_apps_at = Instant::now() - Duration::from_secs(3600); self.load_apps(); }
+        }
         if let Some(t) = w.own_exe().and_then(|e| self.icon(ctx, e)) { return Some(t) }
         if let Some(t) = w.app.as_deref().and_then(|a| self.icon(ctx, a)) { return Some(t) }
         let key = format!("window:{}", w.hwnd);
@@ -434,6 +450,16 @@ impl Bar {
         let tex = dock::window_icon(w.hwnd).map(|(iw, ih, px)| ctx.load_texture(&key, egui::ColorImage::from_rgba_unmultiplied([iw, ih], &px), egui::TextureOptions::LINEAR));
         self.icons.insert(key, tex.clone());
         tex
+    }
+
+    /// The name of an installed app, if Windows' list of apps has this id.
+    fn listed_app(&self, id: &str) -> Option<String> {
+        self.all_apps.lock().ok()?.as_ref()?.iter().find(|(_, a)| a.eq_ignore_ascii_case(id)).map(|(n, _)| n.clone())
+    }
+
+    /// What to pin for an open window: its installed app when Windows lists it, else its program.
+    fn win_pin(&self, w: &dock::Win) -> Option<String> {
+        w.app.clone().filter(|a| self.listed_app(a).is_some()).or_else(|| w.pin_target())
     }
 
     /// One dock slot: the app's icon (or its first letter) and a marker when it is in front.
@@ -485,13 +511,15 @@ impl Bar {
             let min = dock::is_minimized(win.hwnd);
             let front = win.hwnd == self.active && !min;
             let tex = self.win_icon(&ui.ctx().clone(), win);
-            let r = self.slot(ui, tex, &win.title, front, min);
+            let app = win.app.as_deref().and_then(|a| self.listed_app(a));
+            let tip = match &app { Some(n) if !win.title.contains(n.as_str()) => format!("{n}\n{}", win.title), _ => win.title.clone() };
+            let r = self.slot(ui, tex, app.as_deref().unwrap_or(&win.title), front, min).on_hover_text(tip);
             if r.clicked() {
                 if front { dock::minimize(win.hwnd); self.active = 0; } else { dock::focus(win.hwnd); self.active = win.hwnd; }
             }
             if r.middle_clicked() { dock::close(win.hwnd); }
             if r.secondary_clicked() {
-                if let Some(target) = win.pin_target() { if !self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(&target)) { self.pin(&target); } }
+                if let Some(target) = self.win_pin(win) { if !self.settings.pinned.iter().any(|p| p.eq_ignore_ascii_case(&target)) { self.pin(&target); } }
             }
         }
         if wins.len() > shown {
