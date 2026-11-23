@@ -32,6 +32,9 @@ pub struct NetState {
     pub busy: Option<String>,
     pub error: Option<String>,
     pub wifi_on: Option<bool>,
+    /// Set when a switch is clicked: until Windows has finished switching, the popup keeps
+    /// showing what was clicked instead of an older reading.
+    pub hold: Option<Instant>,
     /// The Wi-Fi network Windows is connected to right now, and its signal (0–100).
     pub connected: Option<(String, u32)>,
     pub bluetooth_on: Option<bool>,
@@ -204,9 +207,21 @@ impl Wlan {
     fn disconnect(&self) { if let Some(g) = &self.iface { unsafe { WlanDisconnect(self.h, g, None); } } }
 }
 
+/// The PC's radios, found once and then kept: reading or switching them is then immediate.
+static RADIOS: std::sync::OnceLock<Mutex<Vec<Radio>>> = std::sync::OnceLock::new();
+
+fn radio_list() -> Vec<Radio> {
+    let cached = RADIOS.get().and_then(|m| m.lock().ok().map(|l| l.clone())).unwrap_or_default();
+    if !cached.is_empty() { return cached }
+    let found: Vec<Radio> = wait(Radio::GetRadiosAsync(), Duration::from_secs(4)).map(|l| l.into_iter().collect()).unwrap_or_default();
+    if !found.is_empty() { if let Ok(mut m) = RADIOS.get_or_init(Default::default).lock() { if m.is_empty() { *m = found.clone(); } } }
+    found
+}
+
 /// Wi-Fi and Bluetooth radios: on, off, or None when there is none (or access was refused).
 fn radios() -> (Option<bool>, Option<bool>) {
-    let Ok(list) = wait(Radio::GetRadiosAsync(), Duration::from_secs(4)) else { return (None, None) };
+    let list = radio_list();
+    if list.is_empty() { return (None, None) }
     let (mut wifi, mut bt) = (None, None);
     for r in list {
         let on = r.State().map(|s| s == RadioState::On).ok();
@@ -220,8 +235,10 @@ fn radios() -> (Option<bool>, Option<bool>) {
 }
 
 fn set_radio(bluetooth: bool, on: bool) -> Result<(), String> {
-    let _ = wait(Radio::RequestAccessAsync(), Duration::from_secs(4));
-    let list = wait(Radio::GetRadiosAsync(), Duration::from_secs(4))?;
+    static ACCESS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ACCESS.get_or_init(|| { let _ = wait(Radio::RequestAccessAsync(), Duration::from_secs(4)); });
+    let list = radio_list();
+    if list.is_empty() { return Err("Windows did not find the radio".into()) }
     let kind = if bluetooth { RadioKind::Bluetooth } else { RadioKind::WiFi };
     for r in list {
         if r.Kind().ok() == Some(kind) {
@@ -262,15 +279,13 @@ fn set_hotspot(on: bool) -> Result<(), String> {
 /// settings, or by a key on the keyboard).
 fn watch_radios(tx: Sender<NetCmd>) {
     spawn(move || {
-        let Ok(list) = wait(Radio::GetRadiosAsync(), Duration::from_secs(10)) else { return };
-        let mut kept = Vec::new();
-        for r in list {
+        // The same radios are kept for reading and switching, and stay alive so their reports keep coming.
+        for r in radio_list() {
             let t = tx.clone();
             let h = windows::Foundation::TypedEventHandler::<Radio, windows::core::IInspectable>::new(move |_, _| { let _ = t.send(NetCmd::RadioChanged); Ok(()) });
-            if r.StateChanged(&h).is_ok() { kept.push(r); }
+            let _ = r.StateChanged(&h);
         }
-        // The radios must stay alive for their reports to keep coming.
-        std::mem::forget(kept);
+        let _ = tx.send(NetCmd::RadioChanged);
     });
 }
 
@@ -294,7 +309,10 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, news: Sender<NetCmd>, 
         let (st, wk, busy) = (state.clone(), wake.clone(), reading.clone());
         spawn(move || {
             let (w, b) = radios();
-            if let Ok(mut s) = st.lock() { s.wifi_on = w; s.bluetooth_on = b; }
+            if let Ok(mut s) = st.lock() {
+                // A switch still in progress keeps what was clicked.
+                if s.hold.map(|t| t.elapsed() > Duration::from_secs(6)).unwrap_or(true) { s.wifi_on = w; s.bluetooth_on = b; s.hold = None; }
+            }
             wk.request_repaint();
             let hs = hotspot();
             if let Ok(mut s) = st.lock() { s.hotspot_on = hs; }
@@ -308,12 +326,13 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, news: Sender<NetCmd>, 
         let (st, wk, busy) = (state.clone(), wake.clone(), reading.clone());
         spawn(move || {
             let r = job();
-            if let Ok(mut s) = st.lock() { s.error = r.err().map(|e| format!("{what}: {e}")); }
-            // Read back the real state (unless a read is already running).
+            // Switching is done: show what Windows really has now (instant: the radios are kept).
+            let (w, b) = radios();
+            if let Ok(mut s) = st.lock() { s.error = r.err().map(|e| format!("{what}: {e}")); s.hold = None; s.wifi_on = w; s.bluetooth_on = b; }
+            wk.request_repaint();
             if !busy.swap(true, Ordering::SeqCst) {
-                let (w, b) = radios();
                 let hs = hotspot();
-                if let Ok(mut s) = st.lock() { s.wifi_on = w; s.bluetooth_on = b; s.hotspot_on = hs; }
+                if let Ok(mut s) = st.lock() { s.hotspot_on = hs; }
                 busy.store(false, Ordering::SeqCst);
             }
             wk.request_repaint();

@@ -73,7 +73,7 @@ Both popups work the same way: an on/off switch at the top, your list below, and
 |---|---|---|
 | **Your list** | Nearby networks with signal bars, the connected one first | Your paired devices, connected ones first |
 | **Buttons** | **connect** / **disconnect**; a password box for a new secured network | **connect** / **disconnect** for headphones, speakers and headsets; **forget** removes a device |
-| **Adding** | Type the password once; Windows remembers the network | **search** finds devices in pairing mode, **pair** adds one (Windows asks for a PIN only if the device needs one) |
+| **Adding** | Type the password once; Windows remembers the network | **search** looks for devices in pairing mode for about 25 seconds (it stops by itself, or when the popup closes), **pair** adds one (Windows asks for a PIN only if the device needs one) |
 | **More** | Network settings | Bluetooth settings |
 
 Mice, keyboards and phones connect by themselves when they're switched on, so they show their state without a connect button.
@@ -103,8 +103,8 @@ Ronin Bar doesn't keep its own copy of your settings that could drift. It follow
 | What | How quickly it updates |
 |---|---|
 | **Wi-Fi** | The moment Windows reports a change: a scan finishing, connecting, disconnecting, signal changing, Wi-Fi switched on or off. The connected network is read directly from Windows |
-| **Wi-Fi and Bluetooth switches** | As soon as either is switched, whether from Ronin, Windows Settings, or the airplane key on your keyboard |
-| **Bluetooth devices** | Every few seconds while the popup is open, so headphones connecting or disconnecting show up by themselves |
+| **Wi-Fi and Bluetooth switches** | Instantly. Ronin finds the radios once and keeps them, so switching never waits; switches made in Windows Settings or with the airplane key show up as soon as they happen |
+| **Bluetooth devices** | The moment Windows reports a change: a device paired, connected, disconnected or removed, the same way Windows Settings is kept up to date |
 | **Volume** | Five times a second, so volume keys and other apps' changes show up straight away |
 | **Battery, CPU, memory** | Every second |
 | **Brightness** | Every few seconds, and straight away when you move the slider |
@@ -226,6 +226,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.6.2** | Bluetooth without lag: Windows reports each device change instead of Ronin asking again and again; search stops by itself and never shows while Bluetooth is off; Wi-Fi and Bluetooth switches react instantly; the launcher is just apps and power |
 | **0.6.1** | Wi-Fi, Bluetooth and quick settings never freeze (slow Windows calls get a time limit); everything follows Windows live: change reports, radio switches, volume keys |
 | **0.6.0** | Bluetooth popup works like Wi-Fi: connect / disconnect, search, pair, forget |
 | **0.5.1** | Separate Wi-Fi, Bluetooth and quick-settings icons; **Pin** / **Unpin** in the launcher; a simpler Ronin panel; web apps like Netflix show their own icon |
