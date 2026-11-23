@@ -8,6 +8,7 @@ pub mod calendar;
 pub mod dock;
 pub mod github;
 pub mod launcher;
+pub mod pomodoro;
 pub mod night;
 pub mod settings;
 pub mod theme;
