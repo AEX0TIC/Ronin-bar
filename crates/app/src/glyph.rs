@@ -3,7 +3,7 @@ use eframe::egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps, Update }
+pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps, Update, Toggles }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, s: Stroke) {
     let n = ((a1 - a0).abs() * r / 2.0).ceil().max(6.0) as usize;
@@ -84,6 +84,14 @@ pub fn draw(p: &Painter, r: Rect, g: Glyph, col: Color32) {
             p.add(Shape::line(vec![c + vec2(-3.6, -3.0) * u, c + vec2(0.0, -6.6) * u, c + vec2(3.6, -3.0) * u], s));
             p.add(Shape::line(vec![c + vec2(-6.0, 1.5) * u, c + vec2(-6.0, 6.0) * u, c + vec2(6.0, 6.0) * u, c + vec2(6.0, 1.5) * u], s));
         }
+        Glyph::Toggles => {
+            // Two switches, one on and one off: quick settings.
+            for (y, on) in [(-3.2f32, true), (3.2, false)] {
+                let r = Rect::from_center_size(c + vec2(0.0, y) * u, vec2(13.0 * u, 5.4 * u));
+                p.rect_stroke(r, 2.7 * u, s, eframe::egui::StrokeKind::Middle);
+                p.circle_filled(c + vec2(if on { 3.8 } else { -3.8 }, y) * u, 1.7 * u, col);
+            }
+        }
         Glyph::Apps => {
             for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
                 p.rect_stroke(Rect::from_center_size(c + vec2(x, y) * 3.2 * u, vec2(4.4 * u, 4.4 * u)), 1.2 * u, s, eframe::egui::StrokeKind::Middle);
@@ -138,7 +146,7 @@ pub fn battery(p: &Painter, r: Rect, pct: u8, charging: bool, col: Color32, low:
 
 /// Icons for the quick settings tiles.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Quick { Wifi, Bluetooth, Airplane, Night, Hotspot, Access, Project, Cast, Captions, Share, Battery, Snip, Sun, More, Back }
+pub enum Quick { Bluetooth, Airplane, Night, Hotspot, Access, Project, Cast, Captions, Share, Battery, Snip, Sun, More, Back }
 
 pub fn quick(p: &Painter, r: Rect, q: Quick, col: Color32) {
     let c = r.center();
@@ -150,7 +158,6 @@ pub fn quick(p: &Painter, r: Rect, q: Quick, col: Color32) {
         if closed { p.add(Shape::closed_line(v, s)); } else { p.add(Shape::line(v, s)); }
     };
     match q {
-        Quick::Wifi => network(p, r, true, col, col),
         Quick::Bluetooth => poly(&[(-4.0, -3.5), (4.0, 3.5), (0.0, 7.0), (0.0, -7.0), (4.0, -3.5), (-4.0, 3.5)], false),
         Quick::Airplane => {
             poly(&[(0.0, -7.0), (0.0, 6.5)], false);

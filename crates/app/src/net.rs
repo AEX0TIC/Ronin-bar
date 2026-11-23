@@ -33,6 +33,8 @@ pub struct NetState {
     pub bluetooth_on: Option<bool>,
     /// Mobile hotspot: on, off, or None when this PC cannot share its connection right now.
     pub hotspot_on: Option<bool>,
+    /// Paired Bluetooth devices: name and whether it is connected right now (None until read).
+    pub bt_devices: Option<Vec<(String, bool)>>,
 }
 
 impl NetState {
@@ -52,6 +54,8 @@ pub enum NetCmd {
     /// Every radio off, or back on.
     Airplane(bool),
     Hotspot(bool),
+    /// Read the paired Bluetooth devices again.
+    Devices,
 }
 
 /// Starts the thread. `wake` repaints the bar as soon as anything changes.
@@ -208,6 +212,28 @@ fn set_hotspot(on: bool) -> Result<(), String> {
     }
 }
 
+/// Paired Bluetooth devices (classic and Low Energy), connected ones first.
+fn bt_devices() -> Option<Vec<(String, bool)>> {
+    use windows::core::{Interface, HSTRING};
+    use windows::Devices::Enumeration::{DeviceInformation, DeviceInformationKind};
+    use windows::Foundation::IReference;
+    use windows_collections::IIterable;
+    const CONNECTED: &str = "System.Devices.Aep.IsConnected";
+    let aqs = HSTRING::from("(System.Devices.Aep.ProtocolId:=\"{e0cbf06c-cd8b-4647-bb8a-263b43f0f974}\" OR System.Devices.Aep.ProtocolId:=\"{bb7bb05e-5972-42b5-94fc-76eaa7084d49}\") AND System.Devices.Aep.IsPaired:=System.StructuredQueryType.Boolean#True");
+    let props = IIterable::<HSTRING>::from(vec![HSTRING::from(CONNECTED)]);
+    let list = DeviceInformation::FindAllAsyncWithKindAqsFilterAndAdditionalProperties(&aqs, &props, DeviceInformationKind::AssociationEndpoint).ok()?.join().ok()?;
+    let mut out: Vec<(String, bool)> = Vec::new();
+    for d in list {
+        let name = d.Name().map(|n| n.to_string()).unwrap_or_default();
+        if name.trim().is_empty() || out.iter().any(|(n, _)| *n == name) { continue }
+        let on = d.Properties().ok().and_then(|p| p.Lookup(&HSTRING::from(CONNECTED)).ok())
+            .and_then(|v| v.cast::<IReference<bool>>().ok()).and_then(|r| r.Value().ok()).unwrap_or(false);
+        out.push((name, on));
+    }
+    out.sort_by_key(|(n, on)| (!*on, n.to_lowercase()));
+    Some(out)
+}
+
 fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Context) {
     crate::sys::com_init_mta();
     let wlan = Wlan::open();
@@ -282,6 +308,11 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, wake: eframe::egui::Co
                 set(&|s| s.error = r.clone().err().map(|e| format!("Could not switch airplane mode: {e}")));
                 radios_now();
                 later.extend(soon(&[800, 2500]));
+            }
+            Some(NetCmd::Devices) => {
+                let list = bt_devices().unwrap_or_default();
+                set(&|s| s.bt_devices = Some(list.clone()));
+                radios_now();
             }
             Some(NetCmd::Hotspot(on)) => {
                 let r = set_hotspot(on);

@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "ronin-bar"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "eframe",
  "egui_extras",
@@ -1836,12 +1836,13 @@ dependencies = [
  "sha2",
  "ureq",
  "windows",
+ "windows-collections",
  "winreg 0.55.0",
 ]
 
 [[package]]
 name = "ronin-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
