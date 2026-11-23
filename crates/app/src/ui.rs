@@ -135,7 +135,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (390.0, 370.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -1662,10 +1662,14 @@ impl Bar {
         ui.add_space(4.0);
         ui.label(RichText::new("Installing replaces this version and removes it; your settings, pins and wallpapers stay. The bar restarts in a second.").color(c(t.muted)).size(12.0));
         // Release notes, without the download instructions every release repeats.
-        let notes: Vec<&str> = rel.notes.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with("Download") && !l.starts_with("Uninstall") && !l.starts_with("SHA-256") && !l.starts_with("Updated build")).collect();
+        let notes: Vec<String> = rel.notes.lines().map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with("---") && !l.starts_with("Download") && !l.starts_with("Uninstall") && !l.starts_with("SHA-256") && !l.starts_with("Updated build") && !l.starts_with("Already running"))
+            .map(|l| match l.strip_prefix("- ") { Some(b) => format!("•  {b}"), None => l.replace("**", "") })
+            .collect();
         if !notes.is_empty() {
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height(70.0).show(ui, |ui| { for l in notes { ui.label(RichText::new(l).size(12.0)); } });
+            ui.label(RichText::new("WHAT'S NEW").color(c(t.accent)).size(11.0));
+            egui::ScrollArea::vertical().max_height(110.0).show(ui, |ui| { for l in notes { ui.label(RichText::new(l).size(12.0)); } });
         }
         ui.add_space(8.0);
         self.update_status(ui);
