@@ -34,9 +34,8 @@ mod tests {
 
     #[test]
     fn zero_is_the_plain_screen() {
-        let r = ramp(0);
-        for k in 0..3 {
-            for i in 0..256 { assert_eq!(r[k][i] as usize, i * 257); }
+        for ch in ramp(0) {
+            for (i, v) in ch.iter().enumerate() { assert_eq!(*v as usize, i * 257); }
         }
     }
 
@@ -47,7 +46,7 @@ mod tests {
         assert!(r[1][255] < r[0][255] && r[2][255] < r[1][255]);
         assert!(r[2][255] >= (65535.0 * MIN_BLUE) as u16 - 1);
         // Each channel still rises from dark to bright.
-        for k in 0..3 { assert!(r[k].windows(2).all(|w| w[0] <= w[1])); }
+        for ch in &r { assert!(ch.windows(2).all(|w| w[0] <= w[1])); }
         // Over 100 % is treated as 100 %.
         assert_eq!(ramp(250), r);
     }
