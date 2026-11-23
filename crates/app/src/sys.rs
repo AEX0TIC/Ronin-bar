@@ -221,7 +221,8 @@ pub fn com_init_mta() { unsafe { let _ = CoInitializeEx(None, windows::Win32::Sy
 pub fn com_init() { unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED); } }
 
 pub fn network_manager() -> Option<INetworkListManager> { unsafe { CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL).ok() } }
-pub fn online(n: &INetworkListManager) -> bool { unsafe { n.IsConnectedToInternet().map(|b| b.as_bool()).unwrap_or(false) } }
+/// Connected to a network (Wi-Fi or cable), as Windows' own network icon shows it.
+pub fn online(n: &INetworkListManager) -> bool { unsafe { n.IsConnected().map(|b| b.as_bool()).unwrap_or(false) } }
 
 pub type Volume = IAudioEndpointVolume;
 

@@ -83,6 +83,7 @@ pub struct Bar {
     /// Bluetooth devices (their own thread).
     bt: Arc<Mutex<bt::BtState>>,
     bt_tx: Sender<bt::BtCmd>,
+    bt_at: Instant,
     net_scan_at: Instant,
     /// Every installed app (name, launch id), read in the background; when it was read; the
     /// launcher's search text.
@@ -183,7 +184,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, bt, bt_tx, bt_at: Instant::now(), joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -620,12 +621,13 @@ impl Bar {
                 let r = self.chip(ui, None, self.popup == Some(Popup::Quick), |p, g| glyph::draw(p, g, Glyph::Toggles, fg)).on_hover_text("Quick settings");
                 if r.clicked() { self.toggle_popup(Popup::Quick, r.rect.center().x); }
                 // Bluetooth and Wi-Fi, each with its own popup.
-                let (wifi_on, bt_on) = self.net.lock().map(|n| (n.wifi_on, n.bluetooth_on)).unwrap_or((None, None));
+                let (wifi_on, bt_on, wifi_net) = self.net.lock().map(|n| (n.wifi_on, n.bluetooth_on, n.connected.clone())).unwrap_or((None, None, None));
                 if let Some(on) = bt_on {
                     let r = self.chip(ui, None, self.popup == Some(Popup::Bluetooth), |p, g| glyph::quick(p, g.shrink(1.0), glyph::Quick::Bluetooth, if on { fg } else { muted })).on_hover_text(if on { "Bluetooth on" } else { "Bluetooth off" });
                     if r.clicked() { self.toggle_popup(Popup::Bluetooth, r.rect.center().x); }
                 }
-                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, s.online && wifi_on != Some(false), fg, muted)).on_hover_text("Wi-Fi");
+                let tip = match &wifi_net { Some((n, q)) => format!("Wi-Fi: {n} ({q}%)"), None if wifi_on == Some(false) => "Wi-Fi is off".into(), None if s.online => "Connected by cable".into(), None => "Not connected".into() };
+                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, wifi_net.is_some() || s.online, fg, muted)).on_hover_text(tip);
                 if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
@@ -1134,7 +1136,7 @@ impl Bar {
         ui.horizontal(|ui| {
             if self.from_quick { back = self.back_button(ui); }
             ui.label(RichText::new("Wi-Fi").strong().size(15.0));
-            if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
+            if st.scanning && st.networks.len() < 2 { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(on) = st.wifi_on {
                     if self.switch(ui, on).clicked() { self.radio(false, !on); }
@@ -1212,6 +1214,8 @@ impl Bar {
     fn pop_bluetooth(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let radio = self.net.lock().map(|s| s.bluetooth_on).unwrap_or(None);
+        // While it is open, connections are read again every few seconds.
+        if self.bt_at.elapsed() > Duration::from_secs(4) { self.bt_at = Instant::now(); let _ = self.bt_tx.send(bt::BtCmd::Refresh); }
         let st = self.bt.lock().map(|s| s.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
             ui.label(RichText::new("Bluetooth").strong().size(15.0));
