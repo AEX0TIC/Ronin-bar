@@ -13,7 +13,7 @@ pub struct Progress {
     pub error: Option<String>,
 }
 
-fn agent() -> ureq::Agent {
+pub fn agent() -> ureq::Agent {
     // Windows' own certificate store (the default, a bundled list, does not work with native-tls on Windows).
     let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls)
         .root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
@@ -21,7 +21,7 @@ fn agent() -> ureq::Agent {
         .tls_config(tls)
         .https_only(true)
         .timeout_global(Some(Duration::from_secs(60)))
-        .user_agent("RoninBar/0.4 (+https://github.com/AEX0TIC/Ronin-bar)")
+        .user_agent(concat!("RoninBar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/AEX0TIC/Ronin-bar)"))
         .build()
         .into()
 }

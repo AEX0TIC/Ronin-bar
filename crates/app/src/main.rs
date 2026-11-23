@@ -13,6 +13,7 @@
 #[cfg(windows)] mod store;
 #[cfg(windows)] mod sys;
 #[cfg(windows)] mod ui;
+#[cfg(windows)] mod update;
 #[cfg(windows)] mod worker;
 
 #[cfg(not(windows))]
@@ -44,7 +45,16 @@ fn main() {
         return;
     }
 
-    if !sys::single_instance() { return }
+    // Right after an update the old copy is still closing: wait for it (up to 15 s).
+    let updated = std::env::args().any(|a| a == "--updated");
+    let mut alone = sys::single_instance();
+    for _ in 0..50 {
+        if alone || !updated { break }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        alone = sys::single_instance();
+    }
+    if !alone { return }
+    update::clean_up();
     // Whatever happens, never leave the PC without a taskbar.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| { sys::show_taskbar(None); sys::night_light(0); default_hook(info); }));

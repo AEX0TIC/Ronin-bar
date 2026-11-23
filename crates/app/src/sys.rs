@@ -40,8 +40,13 @@ fn restore_dword(path: &str, name: &str, v: Option<u32>) {
 /// True if this is the only Ronin Bar running. The mutex lives as long as the process.
 pub fn single_instance() -> bool {
     unsafe {
-        let h = CreateMutexW(None, true, w!("Local\\RoninBar.Bar"));
-        h.is_ok() && windows::Win32::Foundation::GetLastError() != windows::Win32::Foundation::ERROR_ALREADY_EXISTS
+        let Ok(h) = CreateMutexW(None, true, w!("Local\\RoninBar.Bar")) else { return false };
+        if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
+            // Let go of it, so it disappears when the other copy quits (an update waits for that).
+            let _ = CloseHandle(h);
+            return false
+        }
+        true
     }
 }
 
@@ -558,6 +563,12 @@ pub fn set_sticky_keys(on: bool) {
         sk.dwFlags = if on { STICKYKEYS_FLAGS(sk.dwFlags.0 | SKF_STICKYKEYSON.0) } else { STICKYKEYS_FLAGS(sk.dwFlags.0 & !SKF_STICKYKEYSON.0) };
         let _ = SystemParametersInfoW(SPI_SETSTICKYKEYS, sk.cbSize, Some(&mut sk as *mut STICKYKEYS as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
     }
+}
+
+/// Opens Ronin Bar's newest release page in the browser (the only web page the bar opens).
+pub fn open_releases_page() {
+    let url = HSTRING::from(ronin_core::update::RELEASES_PAGE);
+    unsafe { let _ = windows::Win32::UI::Shell::ShellExecuteW(None, w!("open"), &url, None, None, SW_SHOWNORMAL); }
 }
 
 /// Windows features that have no public switch: Ronin opens Windows' own screen for them.
