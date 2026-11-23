@@ -218,6 +218,8 @@ pub fn com_init() { unsafe { let _ = CoInitializeEx(None, COINIT_APARTMENTTHREAD
 pub fn network_manager() -> Option<INetworkListManager> { unsafe { CoCreateInstance(&NetworkListManager, None, CLSCTX_ALL).ok() } }
 pub fn online(n: &INetworkListManager) -> bool { unsafe { n.IsConnectedToInternet().map(|b| b.as_bool()).unwrap_or(false) } }
 
+pub type Volume = IAudioEndpointVolume;
+
 pub fn volume_endpoint() -> Option<IAudioEndpointVolume> {
     unsafe {
         let e: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;

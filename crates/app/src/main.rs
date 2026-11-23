@@ -64,6 +64,9 @@ fn main() {
             .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
             .with_inner_size([w as f32 / scale, ui::BAR_HEIGHT]).with_position([0.0, 0.0])
             .with_icon(logo()),
+        // The bar and its popups are separate windows drawn one after the other; waiting for the
+        // screen's refresh after each would halve how fast they react.
+        glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
     let _ = eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings)))));

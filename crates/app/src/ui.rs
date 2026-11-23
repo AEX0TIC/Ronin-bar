@@ -71,8 +71,16 @@ pub struct Bar {
     all_apps: AppList,
     all_apps_at: Instant,
     search: String,
-    /// The brightness being dragged, until the slider is let go.
+    /// The brightness and volume being dragged, until the slider is let go, and when brightness
+    /// was last sent (the screen is asked at most a few times a second).
     bright_drag: Option<f32>,
+    bright_sent: Instant,
+    vol_drag: Option<f32>,
+    /// The theme the colours were last set for.
+    styled: &'static str,
+    /// The popup window is made once and then only shown and hidden, so popups open instantly.
+    popup_live: bool,
+    popup_size: (f32, f32),
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -93,6 +101,10 @@ pub struct Bar {
     /// Start-menu apps, read when the Apps tab is first opened.
     apps: Option<Vec<(String, String)>>,
     query: String,
+}
+
+fn popup_size(p: Popup) -> (f32, f32) {
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0), Popup::Network => (360.0, 470.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -125,8 +137,8 @@ impl Bar {
     pub fn new(cc: &eframe::CreationContext<'_>, store: Arc<Store>, settings: Settings) -> Bar {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
-        let (stats, tx) = worker::start();
-        let (net, net_tx) = net::start();
+        let (stats, tx) = worker::start(cc.egui_ctx.clone());
+        let (net, net_tx) = net::start(cc.egui_ctx.clone());
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
         let packs = Arc::new(Mutex::new(store.load_packs()));
@@ -138,7 +150,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Apps,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new(), apps: None, query: String::new() }
     }
@@ -160,7 +172,7 @@ impl Bar {
         self.popup_x = x;
         self.popup_at = Instant::now();
         if p == Popup::Calendar { let (y, m, _) = sys::today(); self.cal = (y, m); }
-        if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
+        if p == Popup::Network { let _ = self.net_tx.send(net::NetCmd::Refresh); self.net_scan_at = Instant::now() - Duration::from_secs(60); }
         if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
     }
 
@@ -295,6 +307,7 @@ impl Bar {
             self.bar_px = (BAR_HEIGHT * ctx.pixels_per_point()).round() as i32;
             sys::appbar_register(h, self.bar_px);
             self.hwnd = Some(h);
+            self.popup_live = true;   // make the popup window now, hidden, so the first click is instant
             if self.settings.hide_taskbar { self.hide_taskbar(); }
         }
     }
@@ -495,12 +508,12 @@ impl Bar {
                     let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
                     let r = self.chip(ui, Some(text), lv || self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
                     if r.clicked() { self.toggle_popup(Popup::Sound, r.rect.center().x); }
-                    if r.secondary_clicked() || r.middle_clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
+                    if r.secondary_clicked() || r.middle_clicked() { self.set_mute(!m); }
                     if r.hovered() {
                         // One wheel notch = 5 %.
                         let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
                             egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
-                        if dy != 0.0 { let _ = self.tx.send(worker::Cmd::Volume(v + dy.signum() * 0.05)); }
+                        if dy != 0.0 { self.set_volume(v + dy.signum() * 0.05); }
                     }
                 }
                 if let Some((b, charging)) = s.battery {
@@ -578,20 +591,48 @@ impl Bar {
             let (r, mute) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
             if mute.hovered() { ui.painter().rect_filled(r, 8.0, c(t.surface)); }
             glyph::volume(ui.painter(), r.shrink(3.0), v, m, c(if m { t.muted } else { t.fg }));
-            if mute.clicked() { let _ = self.tx.send(worker::Cmd::Mute(!m)); }
+            if mute.clicked() { self.set_mute(!m); }
             ui.label(RichText::new("Sound").strong().size(15.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(if m { "muted".to_string() } else { format!("{:.0}%", v * 100.0) }).size(15.0));
             });
         });
         ui.add_space(8.0);
-        let mut pct = (v * 100.0).round();
         ui.spacing_mut().slider_width = ui.available_width();
-        if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false)).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
+        self.volume_slider(ui, v);
         ui.add_space(6.0);
         let mut mute = m;
-        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
+        if ui.checkbox(&mut mute, "Mute").changed() { self.set_mute(mute); }
         self.settings_link(ui, "Sound settings", "sound");
+    }
+
+    /// Volume and mute, shown at once (the worker thread confirms a moment later).
+    fn set_volume(&mut self, v: f32) {
+        let v = v.clamp(0.0, 1.0);
+        if let Ok(mut s) = self.stats.lock() { s.volume = Some((v, false)); }
+        let _ = self.tx.send(worker::Cmd::Volume(v));
+    }
+    fn set_mute(&mut self, m: bool) {
+        if let Ok(mut s) = self.stats.lock() { if let Some((_, mute)) = s.volume.as_mut() { *mute = m; } }
+        let _ = self.tx.send(worker::Cmd::Mute(m));
+    }
+    /// A volume slider that follows the mouse exactly while dragged.
+    fn volume_slider(&mut self, ui: &mut egui::Ui, v: f32) -> egui::Response {
+        let mut pct = self.vol_drag.unwrap_or((v * 100.0).round());
+        let r = ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).show_value(false));
+        if r.changed() { self.vol_drag = Some(pct); self.set_volume(pct / 100.0); }
+        if !r.dragged() { self.vol_drag = None; }
+        r
+    }
+    /// A brightness slider: follows the mouse, and the screen follows a few times a second.
+    fn brightness_slider(&mut self, ui: &mut egui::Ui, br: u8) -> egui::Response {
+        let mut v = self.bright_drag.unwrap_or(f32::from(br));
+        let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).show_value(false));
+        if r.changed() { self.bright_drag = Some(v); }
+        let send = (r.changed() && (!r.dragged() || self.bright_sent.elapsed() > Duration::from_millis(120))) || r.drag_stopped();
+        if send { let _ = self.tx.send(worker::Cmd::Brightness(v.round() as u8)); self.bright_sent = Instant::now(); }
+        if !r.dragged() && !r.changed() { self.bright_drag = None; }
+        r
     }
 
     /// Reads the installed apps in the background (again if the list is over a minute old, so new
@@ -702,6 +743,12 @@ impl Bar {
         resp
     }
 
+    /// Switches Wi-Fi or Bluetooth, showing the new state at once.
+    fn radio(&mut self, bluetooth: bool, on: bool) {
+        if let Ok(mut s) = self.net.lock() { if bluetooth { s.bluetooth_on = Some(on) } else { s.wifi_on = Some(on) } }
+        let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth, on });
+    }
+
     fn pop_network(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         if self.net_scan_at.elapsed() > Duration::from_secs(10) {
@@ -715,7 +762,7 @@ impl Bar {
             if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(on) = st.wifi_on {
-                    if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: false, on: !on }); }
+                    if self.switch(ui, on).clicked() { self.radio(false, !on); }
                 }
             });
         });
@@ -786,7 +833,7 @@ impl Bar {
             ui.label(RichText::new("Bluetooth").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 match st.bluetooth_on {
-                    Some(on) => { if self.switch(ui, on).clicked() { let _ = self.net_tx.send(net::NetCmd::Radio { bluetooth: true, on: !on }); } }
+                    Some(on) => { if self.switch(ui, on).clicked() { self.radio(true, !on); } }
                     None => { ui.label(RichText::new("none").color(c(t.muted)).size(12.0)); }
                 }
                 if ui.add(egui::Button::new(RichText::new("devices").size(12.0).color(c(t.muted))).frame(false)).clicked() { sys::open_settings("bluetooth"); }
@@ -820,15 +867,8 @@ impl Bar {
         match s.brightness {
             Some(br) => {
                 ui.label(RichText::new(format!("Screen brightness  {:.0}%", self.bright_drag.unwrap_or(f32::from(br)))).strong());
-                let mut v = self.bright_drag.unwrap_or(f32::from(br));
                 ui.spacing_mut().slider_width = ui.available_width();
-                // Sent when the slider is let go, so the screen is not asked a hundred times while dragging.
-                let r = ui.add(egui::Slider::new(&mut v, 0.0..=100.0).show_value(false));
-                if r.changed() { self.bright_drag = Some(v); }
-                if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                    let _ = self.tx.send(worker::Cmd::Brightness(v.round() as u8));
-                    self.bright_drag = None;
-                }
+                self.brightness_slider(ui, br);
             }
             None => { ui.label(RichText::new("Brightness of this screen is set on the monitor itself.").color(c(t.muted)).size(12.0)); }
         }
@@ -888,10 +928,10 @@ impl Bar {
                         ui.horizontal(|ui| {
                             ui.label("Volume");
                             ui.spacing_mut().slider_width = 300.0;
-                            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() { let _ = self.tx.send(worker::Cmd::Volume(pct / 100.0)); }
+                            if ui.add(egui::Slider::new(&mut pct, 0.0..=100.0).suffix("%")).changed() { self.set_volume(pct / 100.0); }
                         });
                         let mut mute = m;
-                        if ui.checkbox(&mut mute, "Mute").changed() { let _ = self.tx.send(worker::Cmd::Mute(mute)); }
+                        if ui.checkbox(&mut mute, "Mute").changed() { self.set_mute(mute); }
                         ui.add_space(8.0);
                         ui.label(RichText::new("On the bar: click the speaker to mute, scroll over it to change the volume.").color(c(t.muted)).size(12.0));
                     }
@@ -1129,6 +1169,38 @@ impl Bar {
         });
     }
 
+    /// The popup window. It is made once (hidden until needed) and reused by every popup, so a
+    /// click on the bar shows it at once instead of building a new window each time.
+    fn popup_window(&mut self, ctx: &egui::Context) {
+        if let Some(p) = self.popup { self.popup_size = popup_size(p); }
+        let (w, h) = self.popup_size;
+        let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
+        let builder = egui::ViewportBuilder::default()
+            .with_title(POPUP_TITLE)
+            .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
+            .with_visible(self.popup.is_some())
+            .with_inner_size([w, h]).with_position(egui::pos2(x, BAR_HEIGHT + 6.0));
+        let id = egui::ViewportId::from_hash_of("ronin-popup");
+        self.popup_live = true;
+        let fresh = self.popup.is_some() && self.popup_at.elapsed() < Duration::from_millis(120);
+        let close = ctx.show_viewport_immediate(id, builder, |ui, _class| {
+            let t = self.theme();
+            let Some(p) = self.popup else {
+                ui.painter().rect_filled(ui.max_rect(), 0.0, c(t.bg));
+                return false
+            };
+            egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui) }
+            });
+            // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
+            ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
+                || (i.viewport().focused == Some(false) && !fresh && self.popup_at.elapsed() > Duration::from_millis(400)))
+        });
+        if fresh { ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus); }
+        if close && self.popup.is_some() { self.close_popup(); }
+    }
+
     /// Gives back the top strip and the taskbar.
     fn release(&mut self) {
         if let Some(h) = self.hwnd.take() {
@@ -1150,8 +1222,9 @@ impl Bar {
 impl eframe::App for Bar {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        ctx.set_visuals(visuals(self.theme()));
-        ctx.request_repaint_after(Duration::from_millis(500));
+        if self.styled != self.theme().id { ctx.set_visuals(visuals(self.theme())); self.styled = self.theme().id; }
+        // Background threads wake the bar when something changes; this only keeps the clock going.
+        ctx.request_repaint_after(Duration::from_millis(if self.popup.is_some() { 250 } else { 1000 }));
         self.dock(&ctx);
         self.tick();
         egui::Frame::new().fill(c(self.theme().bg)).show(ui, |ui| {
@@ -1175,28 +1248,7 @@ impl eframe::App for Bar {
             });
             if close { self.panel = false; }
         }
-        if let Some(p) = self.popup {
-            let (w, h) = match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 250.0), Popup::Network => (360.0, 470.0) };
-            let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
-            let builder = egui::ViewportBuilder::default()
-                .with_title(POPUP_TITLE)
-                .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
-                .with_inner_size([w, h]).with_position(egui::pos2(x, BAR_HEIGHT + 6.0));
-            let id = egui::ViewportId::from_hash_of(("ronin-popup", p));
-            let fresh = self.popup_at.elapsed() < Duration::from_millis(120);
-            let close = ctx.show_viewport_immediate(id, builder, |ui, _class| {
-                let t = self.theme();
-                egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
-                    ui.set_min_size(ui.available_size());
-                    match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui) }
-                });
-                // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
-                ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
-                    || (i.viewport().focused == Some(false) && !fresh && self.popup_at.elapsed() > Duration::from_millis(400)))
-            });
-            if fresh { ctx.send_viewport_cmd_to(id, egui::ViewportCommand::Focus); }
-            if close { self.close_popup(); }
-        }
+        if self.popup.is_some() || self.popup_live { self.popup_window(&ctx); }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) { self.release(); }

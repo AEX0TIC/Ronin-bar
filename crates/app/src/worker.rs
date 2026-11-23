@@ -5,7 +5,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stats {
     pub cpu: u8,
     pub ram: u8,
@@ -23,15 +23,16 @@ pub struct Stats {
 
 pub enum Cmd { Volume(f32), Mute(bool), Brightness(u8), Lock, Sleep, SignOut, Restart, ShutDown }
 
-pub fn start() -> (Arc<Mutex<Stats>>, Sender<Cmd>) {
+/// Starts the thread. `wake` repaints the bar whenever a reading changes, so it never shows stale values.
+pub fn start(wake: eframe::egui::Context) -> (Arc<Mutex<Stats>>, Sender<Cmd>) {
     let stats = Arc::new(Mutex::new(Stats::default()));
     let (tx, rx) = channel();
     let s = stats.clone();
-    std::thread::spawn(move || run(s, rx));
+    std::thread::spawn(move || run(s, rx, wake));
     (stats, tx)
 }
 
-fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
+fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context) {
     sys::com_init();
     let net = sys::network_manager();
     let mut vol = sys::volume_endpoint();
@@ -44,20 +45,20 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(c) => {
             match c {
-                Cmd::Volume(v) => if let Some(e) = &vol { sys::volume_set(e, v); sys::mute_set(e, false) },
-                Cmd::Mute(m) => if let Some(e) = &vol { sys::mute_set(e, m) },
                 Cmd::Brightness(b) => if let Some(w) = &wmi {
+                    // Only the newest level counts when several arrive while the screen is busy.
+                    let mut b = b;
+                    let mut rest = Vec::new();
+                    while let Ok(next) = rx.try_recv() { match next { Cmd::Brightness(n) => b = n, other => rest.push(other) } }
                     sys::brightness_set(w, b);
-                    brightness = sys::brightness_get(w);
+                    brightness = Some(b.min(100));
                     if let Ok(mut s) = stats.lock() { s.brightness = brightness; }
+                    for c in rest { act(c, &vol); }
                 },
-                Cmd::Lock => sys::lock(),
-                Cmd::Sleep => sys::sleep(),
-                Cmd::SignOut => sys::sign_out(),
-                Cmd::Restart => sys::restart(),
-                Cmd::ShutDown => sys::shut_down(),
+                other => act(other, &vol),
             }
             if let (Some(e), Ok(mut s)) = (&vol, stats.lock()) { s.volume = sys::volume_get(e); }
+            wake.request_repaint();
             continue;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -77,6 +78,21 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>) {
             fullscreen: sys::fullscreen_app_active(),
             battery_left: sys::battery_detail().0, saver: sys::battery_detail().1, brightness,
         };
-        if let Ok(mut s) = stats.lock() { *s = fresh; }
+        if let Ok(mut s) = stats.lock() {
+            if *s != fresh { *s = fresh; wake.request_repaint(); }
+        }
+    }
+}
+
+fn act(c: Cmd, vol: &Option<sys::Volume>) {
+    match c {
+        Cmd::Volume(v) => if let Some(e) = vol { sys::volume_set(e, v); sys::mute_set(e, false) },
+        Cmd::Mute(m) => if let Some(e) = vol { sys::mute_set(e, m) },
+        Cmd::Brightness(_) => {}
+        Cmd::Lock => sys::lock(),
+        Cmd::Sleep => sys::sleep(),
+        Cmd::SignOut => sys::sign_out(),
+        Cmd::Restart => sys::restart(),
+        Cmd::ShutDown => sys::shut_down(),
     }
 }
