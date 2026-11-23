@@ -1,6 +1,6 @@
 //! The dock across the top of the screen and its control panel.
 use crate::glyph::{self, Glyph};
-use crate::{dock, download, install, net, store::Store, sys, update, worker};
+use crate::{bt, dock, download, install, net, store::Store, sys, update, worker};
 use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
@@ -80,6 +80,9 @@ pub struct Bar {
     net: Arc<Mutex<net::NetState>>,
     net_tx: Sender<net::NetCmd>,
     joining: Option<(String, String)>,
+    /// Bluetooth devices (their own thread).
+    bt: Arc<Mutex<bt::BtState>>,
+    bt_tx: Sender<bt::BtCmd>,
     net_scan_at: Instant,
     /// Every installed app (name, launch id), read in the background; when it was read; the
     /// launcher's search text.
@@ -132,7 +135,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (340.0, 400.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (390.0, 370.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (390.0, 370.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -167,6 +170,7 @@ impl Bar {
         cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
         let (stats, tx) = worker::start(cc.egui_ctx.clone());
         let (net, net_tx) = net::start(cc.egui_ctx.clone());
+        let (bt, bt_tx) = bt::start(cc.egui_ctx.clone());
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
         let packs = Arc::new(Mutex::new(store.load_packs()));
@@ -179,7 +183,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -215,7 +219,7 @@ impl Bar {
     /// Fresh data for a popup that has just appeared.
     fn opened(&mut self, p: Popup) {
         if matches!(p, Popup::Network | Popup::Quick) { let _ = self.net_tx.send(net::NetCmd::Refresh); }
-        if p == Popup::Bluetooth { let _ = self.net_tx.send(net::NetCmd::Devices); }
+        if p == Popup::Bluetooth { let _ = self.net_tx.send(net::NetCmd::Refresh); let _ = self.bt_tx.send(bt::BtCmd::Refresh); }
         if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
         if p == Popup::Quick { self.quick_view = QuickView::Main; self.quick_note = None; self.sticky = sys::sticky_keys(); }
         if p == Popup::Launcher { self.search.clear(); self.load_apps(); }
@@ -1203,52 +1207,90 @@ impl Bar {
         self.settings_link(ui, "Network settings", "network-status");
     }
 
+    /// Ronin's Bluetooth popup, laid out like the Wi-Fi one: on/off, your devices with connect /
+    /// disconnect, and a search for new ones to pair.
     fn pop_bluetooth(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
-        let st = self.net.lock().map(|s| s.clone()).unwrap_or_default();
+        let radio = self.net.lock().map(|s| s.bluetooth_on).unwrap_or(None);
+        let st = self.bt.lock().map(|s| s.clone()).unwrap_or_default();
         ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-            glyph::quick(ui.painter(), r, glyph::Quick::Bluetooth, c(t.accent));
             ui.label(RichText::new("Bluetooth").strong().size(15.0));
+            if st.scanning { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if let Some(on) = st.bluetooth_on { if self.switch(ui, on).clicked() { self.radio(true, !on); } }
+                if let Some(on) = radio { if self.switch(ui, on).clicked() { self.radio(true, !on); } }
             });
         });
+        if let Some(b) = &st.busy { ui.label(RichText::new(b).color(c(t.muted)).size(12.0)); }
         if let Some(e) = &st.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
-        ui.add_space(8.0);
-        match st.bluetooth_on {
-            None => { ui.label(RichText::new("This PC has no Bluetooth.").color(c(t.muted))); return }
+        ui.add_space(4.0);
+        let mut cmd: Option<bt::BtCmd> = None;
+        match radio {
+            None => { ui.label(RichText::new("This PC has no Bluetooth.").color(c(t.muted))); }
             Some(false) => { ui.label(RichText::new("Bluetooth is off.").color(c(t.muted))); }
             Some(true) => {
-                ui.label(RichText::new("PAIRED DEVICES").color(c(t.accent)).size(11.0));
-                ui.add_space(2.0);
-                match &st.bt_devices {
-                    None => { ui.label(RichText::new("Reading your devices…").color(c(t.muted))); }
-                    Some(list) if list.is_empty() => { ui.label(RichText::new("No devices paired yet.").color(c(t.muted))); }
-                    Some(list) => {
-                        egui::ScrollArea::vertical().max_height(220.0).auto_shrink([false, true]).show(ui, |ui| {
-                            for (name, connected) in list {
-                                ui.horizontal(|ui| {
-                                    ui.painter().circle_filled(ui.cursor().min + vec2(5.0, 10.0), 3.5, if *connected { c(t.accent) } else { c(t.surface) });
-                                    ui.add_space(14.0);
-                                    ui.label(RichText::new(name).size(14.0));
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        ui.label(RichText::new(if *connected { "connected" } else { "paired" }).color(c(if *connected { t.accent } else { t.muted })).size(12.0));
-                                    });
+                egui::ScrollArea::vertical().max_height(330.0).auto_shrink([false, true]).show(ui, |ui| {
+                    ui.label(RichText::new("YOUR DEVICES").color(c(t.accent)).size(11.0));
+                    match &st.paired {
+                        None => { ui.label(RichText::new("Reading your devices…").color(c(t.muted))); }
+                        Some(l) if l.is_empty() => { ui.label(RichText::new("No devices paired yet. Search below to add one.").color(c(t.muted))); }
+                        Some(l) => for d in l {
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                                glyph::quick(ui.painter(), r, glyph::Quick::Bluetooth, if d.connected { c(t.accent) } else { c(t.muted) });
+                                let name = RichText::new(&d.name).strong();
+                                ui.label(if d.connected { name.color(c(t.accent)) } else { name });
+                                if d.connected { ui.label(RichText::new("connected").color(c(t.muted)).size(11.0)); }
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.add(egui::Button::new(RichText::new("forget").size(11.0).color(c(t.muted))).frame(false)).on_hover_text("Remove this device from the PC").clicked() { cmd = Some(bt::BtCmd::Forget(d.id.clone())); }
+                                    match (&d.addr, d.audio, d.connected) {
+                                        (Some(a), true, true) => if ui.small_button("disconnect").clicked() { cmd = Some(bt::BtCmd::Disconnect(a.clone())); },
+                                        (Some(a), true, false) => if ui.small_button("connect").clicked() { cmd = Some(bt::BtCmd::Connect(a.clone())); },
+                                        // Mice, keyboards and phones connect by themselves when they are switched on.
+                                        _ => if !d.connected { ui.label(RichText::new("turn it on to connect").color(c(t.muted)).size(11.0)); },
+                                    }
                                 });
-                                ui.add_space(2.0);
-                            }
-                        });
+                            });
+                            ui.add_space(2.0);
+                        },
                     }
-                }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("NEW DEVICES").color(c(t.accent)).size(11.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add_enabled(!st.scanning, egui::Button::new(if st.nearby.is_some() { "search again" } else { "search" }).small()).clicked() { cmd = Some(bt::BtCmd::Scan); }
+                        });
+                    });
+                    match &st.nearby {
+                        None if !st.scanning => { ui.label(RichText::new("Put your device in pairing mode, then search.").color(c(t.muted)).size(12.0)); }
+                        None => { ui.label(RichText::new("Looking for devices nearby…").color(c(t.muted)).size(12.0)); }
+                        Some(l) if l.is_empty() && !st.scanning => { ui.label(RichText::new("Nothing found. Is the device in pairing mode?").color(c(t.muted)).size(12.0)); }
+                        Some(l) => for d in l {
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
+                                glyph::quick(ui.painter(), r, glyph::Quick::Bluetooth, c(t.muted));
+                                ui.label(&d.name);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("pair").clicked() { cmd = Some(bt::BtCmd::Pair(d.id.clone())); }
+                                });
+                            });
+                        },
+                    }
+                });
             }
         }
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("Add a device").clicked() { sys::open_settings("bluetooth"); }
-                if ui.button("refresh").clicked() { let _ = self.net_tx.send(net::NetCmd::Devices); }
-            });
-        });
+        if let Some(c) = cmd {
+            // Shown at once; the device confirms a moment later.
+            if let Ok(mut s) = self.bt.lock() {
+                match &c {
+                    bt::BtCmd::Connect(_) => s.busy = Some("Connecting…".into()),
+                    bt::BtCmd::Disconnect(_) => s.busy = Some("Disconnecting…".into()),
+                    bt::BtCmd::Scan => s.scanning = true,
+                    _ => {}
+                }
+            }
+            let _ = self.bt_tx.send(c);
+        }
+        self.settings_link(ui, "Bluetooth settings", "bluetooth");
     }
 
     fn pop_battery(&mut self, ui: &mut egui::Ui) {
