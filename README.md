@@ -42,14 +42,14 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 
 | # | Part | Click | Also |
 |---|---|---|---|
-| 1 | **Ronin mark** | **Launcher**: every installed app with icons, search, pinned apps | Right-click opens the Ronin panel |
-| 2 | **Dock** | Pinned apps open; open windows come to the front, or minimise if already in front | Middle-click closes a window, right-click pins its app. A line marks the window in front; dimmed means minimised |
+| 1 | **Ronin mark** | **Launcher**: every installed app with icons, search, and a **Pin** / **Unpin** button on each app | Right-click opens the Ronin panel |
+| 2 | **Dock** | Pinned apps open; open windows come to the front, or minimise if already in front | Right-click a pinned app to unpin it, or an open window to pin its app. Middle-click closes a window. A line marks the window in front; dimmed means minimised |
 | 3 | **Clock** | **Calendar**: today, a month view, and previous/next month | |
 | 4 | **CPU · RAM** | Task Manager | Live usage |
-| 5 | **Network** | **Quick settings** (below) | Shows when you're offline |
+| 5 | **Wi-Fi · Bluetooth · quick settings** | Three icons: **Wi-Fi** (networks: connect, disconnect, join with a password), **Bluetooth** (on/off and your paired devices, connected first) and **quick settings** (below) | Wi-Fi dims when you're offline; Bluetooth dims when it's off |
 | 6 | **Battery** | **Battery**: charge, time left, battery saver, brightness | A bolt while charging |
 | 7 | **Sound** | **Sound**: volume slider and mute | Scroll to change the volume, right-click to mute |
-| 8 | **Wallpapers · themes · apps · settings** | Opens that page of the Ronin panel | Right-click wallpapers for the next one |
+| 8 | **Wallpapers · themes · settings** | Opens that page of the Ronin panel | Right-click wallpapers for the next one |
 | 9 | **Power** | **Power menu**: lock, sleep, sign out, restart, shut down | Asks before anything except lock |
 
 Each open window shows its own app icon. That includes Store apps such as Settings, Calculator and Photos, which the bar looks up by their app ID. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
@@ -58,12 +58,10 @@ The bar steps aside while a fullscreen game or video is in front, and comes back
 
 ## Quick settings
 
-Click the network icon for Ronin's quick settings: 3 tiles a row, lit in your theme's colour when on.
+Click the quick-settings icon (two switches), next to Wi-Fi and Bluetooth: 3 tiles a row, lit in your theme's colour when on. Wi-Fi and Bluetooth have their own icons and popups.
 
 | Tile | What it does |
 |---|---|
-| **Wi-Fi** | On/off. The arrow opens the **network list**: signal, connect, disconnect, join with a password |
-| **Bluetooth** | On/off. The arrow opens your Bluetooth devices |
 | **Airplane mode** | Every radio off; turning it off brings back the ones that were on |
 | **Night light** | Warmer colours for the evening, drawn by Ronin itself, with a strength slider |
 | **Mobile hotspot** | Share this PC's internet connection |
@@ -80,10 +78,11 @@ Below the tiles are **brightness** and **volume** sliders, your battery, Ronin s
 
 Each popup opens under the item you clicked, in your theme. It closes with **Esc**, with a click anywhere else, or with another click on the same item.
 
-- **Launcher** (Ronin mark): every installed app, Store apps included, with real icons. Type to search; **Enter** opens the first match. Pinned apps sit at the top, and right-clicking any app pins it to the dock.
+- **Launcher** (Ronin mark): every installed app, Store apps included, with real icons. Type to search; **Enter** opens the first match. Each app has a **Pin** button (**Unpin** once pinned). Pinned apps sit at the top, where the small **×** unpins them.
 - **Calendar** (clock): a large clock, today's date, and a month view with today marked.
 - **Sound**, **Battery** and **Power**: see [the bar](#the-bar).
-- **Ronin panel** (right-click the mark, or the buttons at the right of the bar): apps and pins, wallpapers, themes, sound, power and settings.
+- **Wi-Fi** and **Bluetooth**: networks, and paired devices with their connection state.
+- **Ronin panel** (right-click the mark, or the buttons at the right of the bar): wallpapers, themes and settings.
 
 The popups are kept ready in the background, so they open instantly and update live as Wi-Fi, volume or battery change.
 
