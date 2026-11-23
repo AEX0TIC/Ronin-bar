@@ -21,7 +21,7 @@ fn agent() -> ureq::Agent {
         .tls_config(tls)
         .https_only(true)
         .timeout_global(Some(Duration::from_secs(60)))
-        .user_agent("RoninBar/0.3 (+https://github.com/AEX0TIC/Ronin-bar)")
+        .user_agent("RoninBar/0.4 (+https://github.com/AEX0TIC/Ronin-bar)")
         .build()
         .into()
 }

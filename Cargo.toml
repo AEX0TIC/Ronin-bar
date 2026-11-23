@@ -5,7 +5,7 @@ members = ["crates/core", "crates/app"]
 default-members = ["crates/core"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/AEX0TIC/Ronin-bar"
