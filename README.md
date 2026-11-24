@@ -64,9 +64,10 @@ Each open window shows its own app's icon and name (hover to see it), even when 
 
 The bar matches each window to the app Windows has it registered as. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
+**Put it where you like:** Settings → **Bar position**: **Top**, **Bottom**, **Left** or **Right**. On the left or right it stands upright: the Ronin mark and the clock at the top, then your apps, and the controls from the bottom up (percentages show when you hover them). Popups and the panel open next to the bar, on whichever side it is.
+
 **It stays out of your way:**
-- **Auto-hide** (on by default): when the mouse leaves the bar, it slides up and leaves a thin line at the top edge. Touch the top of the screen and it slides back. It stays put while a popup or the panel is open. Windows use the whole screen.
-  - **Over a maximised window**, the bar stays fully hidden, like Windows' own hidden taskbar, so it never covers the window's close, minimise and maximise buttons. To bring it down, rest the mouse at the top edge for half a second, anywhere except the top-right corner. To keep the bar always showing, untick **Settings → Hide the bar when not in use**.
+- **Hide the bar when a window needs the space** (on by default): while nothing is under the bar (the desktop, or windows away from its edge) it stays, covering nothing. When the window in front reaches under it (maximised, or moved against that edge), it hides completely, so it never sits on that window's title bar or close, minimise and maximise buttons. To bring it back on purpose, rest the mouse at that edge for half a second (on the top or right edge, not the corner where window buttons are). Windows can use the whole screen. Untick it to keep the bar always in place, with windows next to it.
 - **Fullscreen**: the bar disappears completely while a fullscreen video, game or presentation is in front, and comes back after.
 
 ## Focus timer
@@ -243,6 +244,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.10.0** | Bar on the top, bottom, left or right of the screen; auto-hide gives way only when a window needs the space, so the bar never covers a window unless you call it |
 | **0.9.0** | The bar hides itself when not in use and comes back at the top edge of the screen; it disappears completely for fullscreen videos, games and presentations |
 | **0.8.1** | Wallpapers download and change at once: no waiting before a clicked picture, 4 at a time for categories, and the bar never pauses while the wallpaper is applied |
 | **0.8.0** | Focus timer: a Pomodoro on the bar (25 min focus, 5 min break) with Start, Pause and Reset, and the task you're working on shown next to the time |
