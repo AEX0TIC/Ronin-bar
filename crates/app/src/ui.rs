@@ -119,8 +119,10 @@ pub struct Bar {
     upd_install: bool,
     /// For background work that has to wake the bar.
     ctx: egui::Context,
-    /// The Pomodoro focus timer (its logic is in ronin_core::pomodoro).
+    /// The Pomodoro focus timer (its logic is in ronin_core::pomodoro), and the task being typed
+    /// into its popup before Start.
     pomodoro: Pomodoro,
+    focus_draft: String,
     tab: Tab,
     confirm: Option<Confirm>,
     last_change: Instant,
@@ -141,7 +143,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (300.0, 250.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (320.0, 300.0) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -189,7 +191,7 @@ impl Bar {
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -655,10 +657,18 @@ impl Bar {
                 // Pomodoro: the time left while it runs, just the icon while it is waiting.
                 let now = Instant::now();
                 let p = &self.pomodoro;
-                let text = (p.is_running() || p.done > Duration::ZERO).then(|| p.label(now));
+                // While in use: "Write the report · 24:59" (a long task is shortened), or just the time.
+                let text = (p.is_running() || p.done > Duration::ZERO).then(|| {
+                    if p.task.is_empty() { p.label(now) } else {
+                        let mut short: String = p.task.chars().take(18).collect();
+                        if p.task.chars().count() > 18 { short.push('…'); }
+                        format!("{short} · {}", p.label(now))
+                    }
+                });
                 let col = if p.phase == Phase::Break { accent } else { fg };
                 let r = self.chip(ui, text, self.popup == Some(Popup::Focus), |pt, g| glyph::draw(pt, g, Glyph::Timer, col));
-                if r.on_hover_text("Focus timer").clicked() { self.toggle_popup(Popup::Focus, self.screen_w - 420.0); }
+                let tip = if p.task.is_empty() { "Focus timer".to_string() } else { format!("Focus timer: {}", p.task) };
+                if r.on_hover_text(tip).clicked() { self.toggle_popup(Popup::Focus, self.screen_w - 420.0); }
                 self.divider(ui);
                 if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
                 if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
@@ -1758,13 +1768,29 @@ impl Bar {
             ui.label(RichText::new(phase).strong().size(15.0));
         });
         ui.add_space(6.0);
+        // What you are working on: typed before Start (Enter starts too); shown while it runs.
+        let running = self.pomodoro.is_running();
+        let mut enter = false;
+        if running {
+            let task = if self.pomodoro.task.is_empty() { "No task named".to_string() } else { self.pomodoro.task.clone() };
+            ui.label(RichText::new(task).size(14.0).color(if self.pomodoro.task.is_empty() { c(t.muted) } else { c(t.fg) }));
+        } else {
+            if self.focus_draft.is_empty() && !self.pomodoro.task.is_empty() { self.focus_draft = self.pomodoro.task.clone(); }
+            let field = ui.add(egui::TextEdit::singleline(&mut self.focus_draft).hint_text("What are you working on?").char_limit(ronin_core::pomodoro::MAX_TASK).desired_width(f32::INFINITY).margin(vec2(8.0, 6.0)));
+            if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
+            enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        }
+        ui.add_space(4.0);
         ui.vertical_centered(|ui| { ui.label(RichText::new(self.pomodoro.label(now)).size(44.0).strong()); });
         ui.add_space(10.0);
         let w = (ui.available_width() - 8.0) / 2.0;
         ui.horizontal(|ui| {
-            let running = self.pomodoro.is_running();
-            if ui.add_sized([w, 34.0], egui::Button::new(RichText::new(if running { "Pause" } else { "Start" }).size(14.0))).clicked() {
-                if running { self.pomodoro.pause(now) } else { self.pomodoro.start(now) }
+            if ui.add_sized([w, 34.0], egui::Button::new(RichText::new(if running { "Pause" } else { "Start" }).size(14.0))).clicked() || enter {
+                if running { self.pomodoro.pause(now) } else {
+                    let draft = self.focus_draft.clone();
+                    self.pomodoro.set_task(&draft);
+                    self.pomodoro.start(now);
+                }
             }
             if ui.add_sized([w, 34.0], egui::Button::new(RichText::new("Reset").size(14.0))).clicked() { self.pomodoro.reset(); }
         });
