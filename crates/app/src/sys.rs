@@ -69,6 +69,20 @@ pub fn set_wallpaper(path: &Path) -> bool {
     unsafe { SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, Some(p.as_ptr() as *mut c_void), SPIF_UPDATEINIFILE | SPIF_SENDCHANGE).is_ok() }
 }
 
+/// A thread that sets the desktop wallpaper, so the bar never waits for it: Windows tells every
+/// open app about the new wallpaper before it returns, which can take a second or more. When
+/// several are asked for quickly, only the newest is set.
+pub fn wallpaper_setter() -> std::sync::mpsc::Sender<std::path::PathBuf> {
+    let (tx, rx) = std::sync::mpsc::channel::<std::path::PathBuf>();
+    std::thread::spawn(move || {
+        while let Ok(mut path) = rx.recv() {
+            while let Ok(newer) = rx.try_recv() { path = newer; }
+            set_wallpaper(&path);
+        }
+    });
+    tx
+}
+
 fn broadcast_theme_change() {
     let s = wide("ImmersiveColorSet");
     unsafe { let _ = SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, WPARAM(0), LPARAM(s.as_ptr() as isize), SMTO_ABORTIFHUNG, 300, None); }
