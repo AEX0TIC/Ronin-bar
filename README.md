@@ -25,6 +25,7 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 ## Contents
 
 - [The bar](#the-bar)
+- [Focus timer](#focus-timer)
 - [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)
 - [Quick settings](#quick-settings)
 - [Always in sync with Windows](#always-in-sync-with-windows)
@@ -64,6 +65,14 @@ Each open window shows its own app's icon and name (hover to see it), even when 
 The bar matches each window to the app Windows has it registered as. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
 The bar steps aside while a fullscreen game or video is in front, and comes back after it.
+
+## Focus timer
+
+Click the stopwatch on the bar for a Pomodoro timer: **25 minutes of focus, then a 5-minute break**, over and over.
+
+- Type **what you're working on** first ("Write the report"), then press **Start** or **Enter**.
+- While it runs, the bar shows the task and the time left: `Write the report · 24:59`. During a break the stopwatch turns your theme's colour.
+- **Pause** keeps the time you've done; **Start** carries on from there. **Reset** goes back to a fresh focus and keeps your task for the next round.
 
 ## Wi-Fi and Bluetooth
 
@@ -231,6 +240,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.8.0** | Focus timer: a Pomodoro on the bar (25 min focus, 5 min break) with Start, Pause and Reset, and the task you're working on shown next to the time |
 | **0.7.3** | Wallpapers, Themes and Settings each open as their own page from their bar button; Settings shows only settings |
 | **0.7.2** | The bar follows the screen's real scale: proper height and width after a scale or monitor change, and the panel and popups open in the right place |
 | **0.7.1** | The launcher lists only software: programs and game launchers from your desktop are added (not files, videos or documents), apps like DaVinci Resolve are found through their install folder, Command Prompt, PowerShell and Windows' admin tools are gone, and so is the power button |

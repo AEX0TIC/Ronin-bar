@@ -3,7 +3,7 @@ use eframe::egui::{pos2, vec2, Color32, Painter, Pos2, Rect, Shape, Stroke};
 use std::f32::consts::{PI, TAU};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps, Update, Toggles }
+pub enum Glyph { Gear, Power, Cpu, Ram, Wallpaper, Theme, Apps, Update, Toggles, Timer }
 
 fn arc(p: &Painter, c: Pos2, r: f32, a0: f32, a1: f32, s: Stroke) {
     let n = ((a1 - a0).abs() * r / 2.0).ceil().max(6.0) as usize;
@@ -77,6 +77,13 @@ pub fn draw(p: &Painter, r: Rect, g: Glyph, col: Color32) {
             p.circle_stroke(c, 5.6 * u, s);
             let pts: Vec<Pos2> = (0..=24).map(|i| { let a = PI / 4.0 + PI * i as f32 / 24.0; c + vec2(a.cos(), -a.sin()) * 5.6 * u }).collect();
             p.add(Shape::convex_polygon(pts, col, Stroke::NONE));
+        }
+        Glyph::Timer => {
+            // A stopwatch: a round face, a button on top, and one hand.
+            p.circle_stroke(c + vec2(0.0, 1.0) * u, 5.8 * u, s);
+            p.line_segment([c + vec2(0.0, -6.6) * u, c + vec2(0.0, -4.9) * u], s);
+            p.line_segment([c + vec2(-1.6, -7.2) * u, c + vec2(1.6, -7.2) * u], s);
+            p.line_segment([c + vec2(0.0, 1.0) * u, c + vec2(2.6, -1.6) * u], s);
         }
         Glyph::Update => {
             // An arrow rising out of a tray.

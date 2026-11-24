@@ -14,7 +14,11 @@ pub struct Pomodoro {
     pub phase: Phase,               //Focus or Break 
     pub started: Option<Instant>,   //Some moment while running, None while paused
     pub done: Duration,             //time already done in the phase before the last pause
+    pub task: String,               //what you are working on, e.g. "Write the report" (can be empty)
 }
+
+/// The longest task name kept (it is shown on the bar, so it stays short).
+pub const MAX_TASK: usize = 60;
 
 ///impl holds the functions ("methods") that belong to Pomodoro
 impl Pomodoro {
@@ -26,8 +30,15 @@ impl Pomodoro {
         phase: Phase::Focus,
         started:None,
         done: Duration::ZERO,
+        task: String::new(),
     }
 }
+
+    /// Sets what you are working on: spaces at the ends removed, line breaks and other control
+    /// characters dropped, at most MAX_TASK characters.
+    pub fn set_task(&mut self, text: &str) {
+        self.task = text.trim().chars().filter(|c| !c.is_control()).take(MAX_TASK).collect();
+    }
 
     pub fn is_running(&self) -> bool{
         self.started.is_some()
@@ -96,6 +107,17 @@ mod tests {
 
     fn mins(m: u64) -> Duration { Duration:: from_secs(m * 60) }
     
+    #[test]
+    fn task_is_cleaned_and_kept_short() {
+        let mut p = Pomodoro::new(25, 5);
+        p.set_task("  Write the report\n ");
+        assert_eq!(p.task, "Write the report");
+        p.set_task(&"x".repeat(100));
+        assert_eq!(p.task.chars().count(), MAX_TASK);
+        p.reset();
+        assert_eq!(p.task.chars().count(), MAX_TASK);  // reset keeps the task for the next round
+    }
+
     #[test]
     fn pause_keep_the_time_done() {
         let t0 = Instant::now();
