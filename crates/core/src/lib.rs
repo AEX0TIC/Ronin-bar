@@ -6,6 +6,7 @@ pub mod art;
 pub mod bluetooth;
 pub mod calendar;
 pub mod dock;
+pub mod edge;
 pub mod github;
 pub mod launcher;
 pub mod pomodoro;
