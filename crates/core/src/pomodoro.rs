@@ -90,3 +90,21 @@ pub fn phase_len(&self) -> Duration{
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mins(m: u64) -> Duration { Duration:: from_secs(m * 60) }
+    
+    #[test]
+    fn pause_keep_the_time_done() {
+        let t0 = Instant::now();
+        let mut p = Pomodoro::new(25, 5);
+        p.start(t0);
+        p.pause(t0 + mins(10));
+        assert!(!p.is_running());
+        assert_eq!(p.remaining(t0 + mins(20)), mins(15));
+        p.start(t0 + mins(30));
+        assert_eq!(p.elapsed(t0 + mins(31)), mins(11));
+    }
+}
