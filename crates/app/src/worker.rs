@@ -14,6 +14,9 @@ pub struct Stats {
     /// (level 0..1, muted), None without a sound device.
     pub volume: Option<(f32, bool)>,
     pub fullscreen: bool,
+    /// A maximised window is in front, and where the mouse touches the top edge (x in pixels).
+    pub maximized: bool,
+    pub cursor_top: Option<i32>,
     /// Minutes of battery left, and battery saver on.
     pub battery_left: Option<u32>,
     pub saver: bool,
@@ -70,6 +73,11 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
         tick += 1;
+        // Read ten times a second (both are cheap), so the bar reacts to the top edge at once.
+        let (maxed, top) = (sys::maximized_in_front(), sys::cursor_at_top());
+        if let Ok(mut s) = stats.lock() {
+            if s.maximized != maxed || s.cursor_top != top { s.maximized = maxed; s.cursor_top = top; wake.request_repaint(); }
+        }
         // Volume is cheap to read: often, so volume keys and other apps show up at once.
         if tick.is_multiple_of(2) {
             let v = vol.as_ref().and_then(sys::volume_get);
@@ -87,6 +95,7 @@ fn run(stats: Arc<Mutex<Stats>>, rx: Receiver<Cmd>, wake: eframe::egui::Context)
             online: net.as_ref().map(sys::online).unwrap_or(false),
             volume: vol.as_ref().and_then(sys::volume_get),
             fullscreen: sys::fullscreen_app_active(),
+            maximized: maxed, cursor_top: top,
             battery_left: sys::battery_detail().0, saver: sys::battery_detail().1, brightness,
         };
         if let Ok(mut s) = stats.lock() {

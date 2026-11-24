@@ -73,6 +73,8 @@ pub struct Bar {
     /// was last on it (or a popup was open).
     bar_y: i32,
     inside_at: Instant,
+    /// When the mouse started resting at the top edge (over a maximised window).
+    edge_since: Option<Instant>,
     topmost: bool,
     panel: bool,
     /// The open popup, the bar position it hangs from, when it opened, and the last one closed.
@@ -196,7 +198,7 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_y: 0, inside_at: Instant::now(), topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_y: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
               popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
@@ -403,13 +405,29 @@ impl Bar {
     /// a popup or the panel is open.
     fn place_bar(&mut self, ctx: &egui::Context) {
         let Some(h) = self.hwnd else { return };
-        let full = self.stats.lock().map(|s| s.fullscreen).unwrap_or(false);
+        let (full, maxed, top_x) = self.stats.lock().map(|s| (s.fullscreen, s.maximized, s.cursor_top)).unwrap_or((false, false, None));
+        let auto = self.settings.auto_hide;
         let inside = ctx.input(|i| i.pointer.hover_pos().is_some());
         let busy = self.popup.is_some() || self.panel;
         if inside || busy { self.inside_at = Instant::now(); }
-        let show = !full && (!self.settings.auto_hide || self.inside_at.elapsed() < Duration::from_millis(700));
+        // Over a maximised window the bar stays out of the way completely, like Windows' own
+        // hidden taskbar: a quick move to the window's close / minimise / maximise buttons never
+        // brings it down. It comes when the mouse rests at the top edge for half a second, away
+        // from the top-right corner where those buttons are.
+        let stay_away = auto && maxed;
+        let corner = (190.0 * ctx.pixels_per_point()) as i32;
+        let screen_px = (self.screen_w * ctx.pixels_per_point()) as i32;
+        let resting = top_x.is_some_and(|x| x < screen_px - corner);
+        if stay_away && resting {
+            let since = *self.edge_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= Duration::from_millis(500) { self.inside_at = Instant::now(); }
+            else { ctx.request_repaint_after(Duration::from_millis(60)); }
+        } else { self.edge_since = None; }
+        let show = !full && (!auto || self.inside_at.elapsed() < Duration::from_millis(700));
         let v = ctx.animate_bool_with_time(egui::Id::unique("ronin-bar-shown"), show, 0.14);
-        let hidden = if full { -self.bar_px } else { -(self.bar_px - 2) };
+        // Hidden: a thin line stays at the top edge to bring it back, except over fullscreen and
+        // maximised windows, where nothing is left in the way of their own buttons.
+        let hidden = if full || stay_away { -self.bar_px } else { -(self.bar_px - 2) };
         let y = (hidden as f32 * (1.0 - v)).round() as i32;
         if y != self.bar_y { self.bar_y = y; sys::pin_top(h, self.bar_px, y); }
         // Look again shortly, to slide away once the mouse has left.
