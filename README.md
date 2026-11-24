@@ -65,7 +65,8 @@ Each open window shows its own app's icon and name (hover to see it), even when 
 The bar matches each window to the app Windows has it registered as. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
 **It stays out of your way:**
-- **Auto-hide** (on by default): when the mouse leaves the bar, it slides up and leaves a thin line at the top edge. Touch the top of the screen and it slides back. It stays put while a popup or the panel is open. Windows use the whole screen. To keep the bar always showing, untick **Settings → Hide the bar when not in use**.
+- **Auto-hide** (on by default): when the mouse leaves the bar, it slides up and leaves a thin line at the top edge. Touch the top of the screen and it slides back. It stays put while a popup or the panel is open. Windows use the whole screen.
+  - **Over a maximised window**, the bar stays fully hidden, like Windows' own hidden taskbar, so it never covers the window's close, minimise and maximise buttons. To bring it down, rest the mouse at the top edge for half a second, anywhere except the top-right corner. To keep the bar always showing, untick **Settings → Hide the bar when not in use**.
 - **Fullscreen**: the bar disappears completely while a fullscreen video, game or presentation is in front, and comes back after.
 
 ## Focus timer
