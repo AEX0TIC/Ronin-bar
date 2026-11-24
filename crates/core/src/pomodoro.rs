@@ -29,8 +29,8 @@ impl Pomodoro {
     }
 }
 
-pub fn is_running(&self) -> bool{
-    self.started.is_some()
+    pub fn is_running(&self) -> bool{
+        self.started.is_some()
 }
 
 pub fn phase_len(&self) -> Duration{
@@ -39,4 +39,7 @@ pub fn phase_len(&self) -> Duration{
         Phase::Break => self.break_len,
         }
     }
-}
+
+    pub fn elapsed(&self, now: Instant) -> Duration{
+        let since_start = match.self.started
+    }
