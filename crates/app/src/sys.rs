@@ -504,6 +504,26 @@ pub fn fullscreen_app_active() -> bool {
     }
 }
 
+/// A maximised window is in front on the main screen (its title-bar buttons are then at the
+/// top edge, where the bar would come down).
+pub fn maximized_in_front() -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || !IsZoomed(fg).as_bool() { return false }
+        let primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        MonitorFromWindow(fg, windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST) == primary
+    }
+}
+
+/// Where the mouse is along the top edge of the main screen (its x in pixels), or None when it
+/// is not touching that edge.
+pub fn cursor_at_top() -> Option<i32> {
+    let mut p = windows::Win32::Foundation::POINT::default();
+    unsafe { GetCursorPos(&mut p).ok()?; }
+    let (w, _, _) = primary_screen();
+    (p.y <= 1 && p.x >= 0 && p.x < w).then_some(p.x)
+}
+
 /// Puts the bar above or below other windows.
 pub fn set_topmost(hwnd: HWND, on: bool) {
     let after = if on { HWND_TOPMOST } else { HWND_NOTOPMOST };
