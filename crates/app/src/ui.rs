@@ -69,6 +69,10 @@ pub struct Bar {
     tx: Sender<worker::Cmd>,
     hwnd: Option<HWND>,
     bar_px: i32,
+    /// Where the bar is: 0 when shown, above the screen's edge while slid away, and when the mouse
+    /// was last on it (or a popup was open).
+    bar_y: i32,
+    inside_at: Instant,
     topmost: bool,
     panel: bool,
     /// The open popup, the bar position it hangs from, when it opened, and the last one closed.
@@ -192,7 +196,7 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_y: 0, inside_at: Instant::now(), topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
               popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
@@ -365,7 +369,8 @@ impl Bar {
         if self.hwnd.is_some() { return }
         if let Some(h) = sys::find_window(TITLE) {
             self.bar_px = (BAR_HEIGHT * ctx.pixels_per_point()).round() as i32;
-            sys::appbar_register(h, self.bar_px);
+            // A bar that hides itself keeps no strip for itself: windows use the whole screen.
+            if self.settings.auto_hide { sys::pin_top(h, self.bar_px, 0); sys::keep_top_free(0); } else { sys::appbar_register(h, self.bar_px); }
             self.hwnd = Some(h);
             self.popup_live = true;   // make the popup window now, hidden, so the first click is instant
             self.load_apps();         // the list of installed apps also names and draws open windows
@@ -385,7 +390,39 @@ impl Bar {
         let px = (BAR_HEIGHT * ppp).round() as i32;
         if px != self.bar_px && px > 0 {
             self.bar_px = px;
-            sys::appbar_resize(h, px);
+            if !self.settings.auto_hide { sys::appbar_resize(h, px); }
+        }
+    }
+
+    /// The top strip kept free for the bar: none while it hides itself.
+    fn reserved_px(&self) -> i32 { if self.settings.auto_hide { 0 } else { self.bar_px } }
+
+    /// Shows or slides away the bar. It goes completely while a fullscreen video, game or
+    /// presentation is in front. With auto-hide, it slides up when the mouse leaves it (leaving a
+    /// thin line at the top edge) and comes back when the mouse touches that edge; it stays while
+    /// a popup or the panel is open.
+    fn place_bar(&mut self, ctx: &egui::Context) {
+        let Some(h) = self.hwnd else { return };
+        let full = self.stats.lock().map(|s| s.fullscreen).unwrap_or(false);
+        let inside = ctx.input(|i| i.pointer.hover_pos().is_some());
+        let busy = self.popup.is_some() || self.panel;
+        if inside || busy { self.inside_at = Instant::now(); }
+        let show = !full && (!self.settings.auto_hide || self.inside_at.elapsed() < Duration::from_millis(700));
+        let v = ctx.animate_bool_with_time(egui::Id::unique("ronin-bar-shown"), show, 0.14);
+        let hidden = if full { -self.bar_px } else { -(self.bar_px - 2) };
+        let y = (hidden as f32 * (1.0 - v)).round() as i32;
+        if y != self.bar_y { self.bar_y = y; sys::pin_top(h, self.bar_px, y); }
+        // Look again shortly, to slide away once the mouse has left.
+        if self.settings.auto_hide && show && !inside && !busy { ctx.request_repaint_after(Duration::from_millis(150)); }
+    }
+
+    /// Auto-hide switched on or off: give the top strip back to windows, or take it again.
+    fn set_auto_hide(&mut self, on: bool) {
+        self.settings.auto_hide = on;
+        self.save();
+        if let Some(h) = self.hwnd {
+            if on { sys::appbar_remove(h); sys::keep_top_free(0); } else { sys::appbar_register(h, self.bar_px); }
+            self.refitted.clear();
         }
     }
 
@@ -411,14 +448,14 @@ impl Bar {
         if self.hwnd.is_some() && self.guard_at.elapsed() >= Duration::from_secs(1) {
             self.guard_at = Instant::now();
             if !full {
-                sys::keep_top_free(self.bar_px);
+                sys::keep_top_free(self.reserved_px());
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
-                if let Some(h) = self.hwnd { sys::pin_top(h, self.bar_px); }
+                if let Some(h) = self.hwnd { sys::pin_top(h, self.bar_px, self.bar_y); }
                 // Each window is fixed at most once a minute, so an app that insists on its own
                 // position never flickers.
                 self.refitted.retain(|_, t| t.elapsed() < Duration::from_secs(60));
                 for w in &self.wins {
-                    if !self.refitted.contains_key(&w.hwnd) && sys::misfit_maximized(w.hwnd, self.bar_px) {
+                    if !self.refitted.contains_key(&w.hwnd) && sys::misfit_maximized(w.hwnd, self.reserved_px()) {
                         sys::refit(w.hwnd);
                         self.refitted.insert(w.hwnd, Instant::now());
                     }
@@ -1504,6 +1541,10 @@ impl Bar {
                 }
                 ui.label(RichText::new("Hides the Windows taskbar while Ronin Bar runs; it comes back when you quit or uninstall. The Ronin mark opens your apps, the clock the calendar, and the icons on the right Wi-Fi, Bluetooth, quick settings, battery and sound.").color(c(t.muted)).size(12.0));
                 ui.add_space(6.0);
+                let mut auto = self.settings.auto_hide;
+                if ui.checkbox(&mut auto, "Hide the bar when not in use").changed() { self.set_auto_hide(auto); }
+                ui.label(RichText::new("The bar slides up out of the way and comes back when the mouse touches the top edge of the screen; windows then use the whole screen. It always steps aside for fullscreen videos and games.").color(c(t.muted)).size(12.0));
+                ui.add_space(6.0);
                 let mut start = self.settings.start_with_windows;
                 if ui.checkbox(&mut start, "Start with Windows").changed() {
                     self.settings.start_with_windows = start;
@@ -1864,6 +1905,7 @@ impl eframe::App for Bar {
         ctx.request_repaint_after(Duration::from_millis(if self.popup.is_some() { 250 } else { 1000 }));
         self.dock(&ctx);
         if self.guard_at.elapsed() >= Duration::from_secs(1) { self.follow_screen(&ctx); }
+        self.place_bar(&ctx);
         // The focus timer moves on by itself: switch focus ↔ break when time is up, and redraw
         // once a second so the countdown on the bar keeps ticking.
         self.pomodoro.tick(Instant::now());
