@@ -7,6 +7,7 @@ use ronin_core::theme::{self, Theme, THEMES};
 use ronin_core::wallhaven::{self, Wallpaper, COLLECTIONS, PER_COLLECTION};
 use ronin_core::{art, dock as pins, github};
 use ronin_core::pomodoro::{Phase, Pomodoro};
+use ronin_core::edge::{Edge, EDGES};
 use std::collections::HashMap;
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +18,8 @@ const PANEL_TITLE: &str = "Ronin Bar · control";
 const POPUP_TITLE: &str = "Ronin Bar · popup";
 /// Bar height in logical pixels.
 pub const BAR_HEIGHT: f32 = 36.0;
+/// Width of the bar when it stands on the left or right of the screen.
+pub const BAR_W: f32 = 52.0;
 /// Dock icon size and slot width in logical pixels.
 const ICON: f32 = 20.0;
 const SLOT: f32 = 34.0;
@@ -69,9 +72,9 @@ pub struct Bar {
     tx: Sender<worker::Cmd>,
     hwnd: Option<HWND>,
     bar_px: i32,
-    /// Where the bar is: 0 when shown, above the screen's edge while slid away, and when the mouse
-    /// was last on it (or a popup was open).
-    bar_y: i32,
+    /// How far the bar is slid off the screen (0 = shown), and when the mouse was last on it (or
+    /// a popup was open).
+    bar_hide: i32,
     inside_at: Instant,
     /// When the mouse started resting at the top edge (over a maximised window).
     edge_since: Option<Instant>,
@@ -135,6 +138,7 @@ pub struct Bar {
     confirm: Option<Confirm>,
     last_change: Instant,
     screen_w: f32,
+    screen_h: f32,
     /// Open app windows, refreshed a few times a second.
     wins: Vec<dock::Win>,
     wins_at: Instant,
@@ -198,9 +202,9 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_y: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_hide: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
               popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
-              confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
+              confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, screen_h: h as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
 
@@ -370,9 +374,15 @@ impl Bar {
     fn dock(&mut self, ctx: &egui::Context) {
         if self.hwnd.is_some() { return }
         if let Some(h) = sys::find_window(TITLE) {
-            self.bar_px = (BAR_HEIGHT * ctx.pixels_per_point()).round() as i32;
+            let ppp = ctx.pixels_per_point();
+            self.bar_px = (self.thick() * ppp).round() as i32;
+            let edge = self.edge();
+            // A strip an earlier run kept free on another edge is given back.
+            for e in EDGES {
+                if e != edge { sys::release_edge(e, ((if e.vertical() { BAR_W } else { BAR_HEIGHT }) * ppp).round() as i32); }
+            }
             // A bar that hides itself keeps no strip for itself: windows use the whole screen.
-            if self.settings.auto_hide { sys::pin_top(h, self.bar_px, 0); sys::keep_top_free(0); } else { sys::appbar_register(h, self.bar_px); }
+            if self.settings.auto_hide { sys::place(h, edge, self.bar_px, 0); sys::release_edge(edge, self.bar_px); } else { sys::appbar_register(h, edge, self.bar_px); }
             self.hwnd = Some(h);
             self.popup_live = true;   // make the popup window now, hidden, so the first click is instant
             self.load_apps();         // the list of installed apps also names and draws open windows
@@ -386,14 +396,55 @@ impl Bar {
     fn follow_screen(&mut self, ctx: &egui::Context) {
         let Some(h) = self.hwnd else { return };
         let ppp = ctx.pixels_per_point();
-        let (w, _, _) = sys::primary_screen();
+        let (w, hh, _) = sys::primary_screen();
         let sw = w as f32 / ppp;
         if (sw - self.screen_w).abs() > 0.5 { self.screen_w = sw; }
-        let px = (BAR_HEIGHT * ppp).round() as i32;
+        self.screen_h = hh as f32 / ppp;
+        let px = (self.thick() * ppp).round() as i32;
         if px != self.bar_px && px > 0 {
             self.bar_px = px;
-            if !self.settings.auto_hide { sys::appbar_resize(h, px); }
+            if !self.settings.auto_hide { sys::appbar_resize(h, self.edge(), px); }
         }
+    }
+
+    // ───── where the bar is ─────
+    fn edge(&self) -> Edge { self.settings.edge() }
+    fn vertical(&self) -> bool { self.edge().vertical() }
+    /// How deep the bar is, in points: its height on the top or bottom, its width on a side.
+    fn thick(&self) -> f32 { if self.vertical() { BAR_W } else { BAR_HEIGHT } }
+    /// Where along the bar something is (x on a top or bottom bar, y on a side bar): popups open there.
+    fn along(&self, r: Rect) -> f32 { if self.vertical() { r.center().y } else { r.center().x } }
+    /// A spot `d` points from the far end of the bar.
+    fn anchor_end(&self, d: f32) -> f32 { if self.vertical() { self.screen_h - d } else { self.screen_w - d } }
+
+    /// Where a popup `w` × `h` goes: next to the bar, at `at` along it, kept on the screen.
+    fn popup_pos(&self, at: f32, w: f32, h: f32) -> egui::Pos2 {
+        let (sw, sh, t) = (self.screen_w, self.screen_h, self.thick());
+        let x = (at - w / 2.0).clamp(8.0, (sw - w - 8.0).max(8.0));
+        let y = (at - h / 2.0).clamp(8.0, (sh - h - 8.0).max(8.0));
+        match self.edge() {
+            Edge::Top => egui::pos2(x, t + 6.0),
+            Edge::Bottom => egui::pos2(x, (sh - t - 6.0 - h).max(0.0)),
+            Edge::Left => egui::pos2(t + 6.0, y),
+            Edge::Right => egui::pos2((sw - t - 6.0 - w).max(0.0), y),
+        }
+    }
+
+    /// Moves the bar to another edge of the screen: gives the old strip back and takes the new one.
+    fn set_edge(&mut self, e: Edge) {
+        if e == self.edge() { return }
+        let old = self.edge();
+        if let Some(h) = self.hwnd { sys::appbar_remove(h); sys::release_edge(old, self.bar_px); }
+        self.settings.bar_edge = e.id().to_string();
+        self.save();
+        self.bar_px = (self.thick() * self.ctx.pixels_per_point()).round() as i32;
+        if let Some(h) = self.hwnd {
+            if !self.settings.auto_hide { sys::appbar_register(h, e, self.bar_px); }
+            sys::place(h, e, self.bar_px, 0);
+        }
+        self.bar_hide = 0;
+        self.refitted.clear();
+        self.popup = None;
     }
 
     /// The top strip kept free for the bar: none while it hides itself.
@@ -405,33 +456,38 @@ impl Bar {
     /// a popup or the panel is open.
     fn place_bar(&mut self, ctx: &egui::Context) {
         let Some(h) = self.hwnd else { return };
-        let (full, maxed, top_x) = self.stats.lock().map(|s| (s.fullscreen, s.maximized, s.cursor_top)).unwrap_or((false, false, None));
+        let edge = self.edge();
+        let (full, at) = self.stats.lock().map(|s| (s.fullscreen, s.cursor_edge)).unwrap_or((false, None));
         let auto = self.settings.auto_hide;
         let inside = ctx.input(|i| i.pointer.hover_pos().is_some());
         let busy = self.popup.is_some() || self.panel;
         if inside || busy { self.inside_at = Instant::now(); }
-        // Over a maximised window the bar stays out of the way completely, like Windows' own
-        // hidden taskbar: a quick move to the window's close / minimise / maximise buttons never
-        // brings it down. It comes when the mouse rests at the top edge for half a second, away
-        // from the top-right corner where those buttons are.
-        let stay_away = auto && maxed;
-        let corner = (190.0 * ctx.pixels_per_point()) as i32;
-        let screen_px = (self.screen_w * ctx.pixels_per_point()) as i32;
-        let resting = top_x.is_some_and(|x| x < screen_px - corner);
-        if stay_away && resting {
+        // With auto-hide the bar only gives way when a window needs the space: while nothing is
+        // under it (the desktop, windows away from its edge) it stays, covering nothing. When the
+        // window in front reaches under it (maximised, or dragged against that edge) it hides
+        // completely, so it never sits on that window's title bar or buttons. Resting the mouse at
+        // the edge for half a second brings it back on purpose (never the corner where a window's
+        // close / minimise / maximise buttons are).
+        let covering = auto && sys::window_under(edge, self.bar_px);
+        let ppp = ctx.pixels_per_point();
+        let (sw, sh) = ((self.screen_w * ppp) as i32, (self.screen_h * ppp) as i32);
+        let corner = (190.0 * ppp) as i32;
+        let resting = at.is_some_and(|(x, y)| edge.touches(sw, sh, x, y) && match edge {
+            Edge::Top => x < sw - corner,
+            Edge::Right => y > corner,
+            _ => true,
+        });
+        if covering && resting {
             let since = *self.edge_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= Duration::from_millis(500) { self.inside_at = Instant::now(); }
             else { ctx.request_repaint_after(Duration::from_millis(60)); }
         } else { self.edge_since = None; }
-        let show = !full && (!auto || self.inside_at.elapsed() < Duration::from_millis(700));
+        let show = !full && (!covering || self.inside_at.elapsed() < Duration::from_millis(700));
         let v = ctx.animate_bool_with_time(egui::Id::unique("ronin-bar-shown"), show, 0.14);
-        // Hidden: a thin line stays at the top edge to bring it back, except over fullscreen and
-        // maximised windows, where nothing is left in the way of their own buttons.
-        let hidden = if full || stay_away { -self.bar_px } else { -(self.bar_px - 2) };
-        let y = (hidden as f32 * (1.0 - v)).round() as i32;
-        if y != self.bar_y { self.bar_y = y; sys::pin_top(h, self.bar_px, y); }
-        // Look again shortly, to slide away once the mouse has left.
-        if self.settings.auto_hide && show && !inside && !busy { ctx.request_repaint_after(Duration::from_millis(150)); }
+        let hide = (self.bar_px as f32 * (1.0 - v)).round() as i32;
+        if hide != self.bar_hide { self.bar_hide = hide; sys::place(h, edge, self.bar_px, hide); }
+        // Look again a few times a second, to notice a window moving under the bar or away.
+        if auto { ctx.request_repaint_after(Duration::from_millis(300)); }
     }
 
     /// Auto-hide switched on or off: give the top strip back to windows, or take it again.
@@ -439,7 +495,8 @@ impl Bar {
         self.settings.auto_hide = on;
         self.save();
         if let Some(h) = self.hwnd {
-            if on { sys::appbar_remove(h); sys::keep_top_free(0); } else { sys::appbar_register(h, self.bar_px); }
+            let edge = self.edge();
+            if on { sys::appbar_remove(h); sys::release_edge(edge, self.bar_px); } else { sys::appbar_register(h, edge, self.bar_px); }
             self.refitted.clear();
         }
     }
@@ -466,14 +523,15 @@ impl Bar {
         if self.hwnd.is_some() && self.guard_at.elapsed() >= Duration::from_secs(1) {
             self.guard_at = Instant::now();
             if !full {
-                sys::keep_top_free(self.reserved_px());
+                // Only the bar's own strip is kept free or given back (never what Windows' taskbar holds).
+                if self.settings.auto_hide { sys::release_edge(self.edge(), self.bar_px); } else { sys::keep_free(self.edge(), self.bar_px); }
                 if self.settings.hide_taskbar { self.hide_taskbar(); }
-                if let Some(h) = self.hwnd { sys::pin_top(h, self.bar_px, self.bar_y); }
+                if let Some(h) = self.hwnd { sys::place(h, self.edge(), self.bar_px, self.bar_hide); }
                 // Each window is fixed at most once a minute, so an app that insists on its own
                 // position never flickers.
                 self.refitted.retain(|_, t| t.elapsed() < Duration::from_secs(60));
                 for w in &self.wins {
-                    if !self.refitted.contains_key(&w.hwnd) && sys::misfit_maximized(w.hwnd, self.reserved_px()) {
+                    if !self.refitted.contains_key(&w.hwnd) && sys::misfit_maximized(w.hwnd, self.edge(), self.reserved_px()) {
                         sys::refit(w.hwnd);
                         self.refitted.insert(w.hwnd, Instant::now());
                     }
@@ -495,6 +553,16 @@ impl Bar {
     /// A clickable bar item: a glyph and optional text, with a soft pill on hover.
     fn chip(&self, ui: &mut egui::Ui, text: Option<String>, lit: bool, draw: impl FnOnce(&egui::Painter, Rect)) -> egui::Response {
         let t = self.theme();
+        if self.vertical() {
+            // Standing bar: just the icon; any text (a percentage, the timer) shows on hover.
+            let (rect, mut r) = ui.allocate_exact_size(vec2(BAR_W, 34.0), Sense::click());
+            let pill = rect.shrink2(vec2(6.0, 1.0));
+            if r.hovered() || lit { ui.painter().rect_filled(pill, 9.0, c(t.surface)); }
+            if lit { ui.painter().rect_stroke(pill, 9.0, Stroke::new(1.0, c(t.accent).gamma_multiply(0.7)), egui::StrokeKind::Inside); }
+            draw(ui.painter(), Rect::from_center_size(rect.center(), Vec2::splat(16.0)));
+            if let Some(s) = text { r = r.on_hover_text(s); }
+            return r
+        }
         let galley = text.map(|s| ui.painter().layout_no_wrap(s, FontId::proportional(12.5), c(t.fg)));
         let (pad, gw, gap) = (8.0, 16.0, 5.0);
         let w = pad * 2.0 + gw + galley.as_ref().map(|g| gap + g.size().x).unwrap_or(0.0);
@@ -509,8 +577,14 @@ impl Bar {
     }
 
     fn divider(&self, ui: &mut egui::Ui) {
+        let st = Stroke::new(1.0, c(self.theme().muted).gamma_multiply(0.45));
+        if self.vertical() {
+            let (r, _) = ui.allocate_exact_size(vec2(BAR_W, 9.0), Sense::hover());
+            ui.painter().line_segment([pos2(r.left() + 14.0, r.center().y), pos2(r.right() - 14.0, r.center().y)], st);
+            return
+        }
         let (r, _) = ui.allocate_exact_size(vec2(9.0, BAR_HEIGHT), Sense::hover());
-        ui.painter().line_segment([pos2(r.center().x, r.top() + 11.0), pos2(r.center().x, r.bottom() - 11.0)], Stroke::new(1.0, c(self.theme().muted).gamma_multiply(0.45)));
+        ui.painter().line_segment([pos2(r.center().x, r.top() + 11.0), pos2(r.center().x, r.bottom() - 11.0)], st);
     }
 
     /// An open window's icon: its program's, else its installed app's (Store apps), else the icon
@@ -551,8 +625,11 @@ impl Bar {
     /// One dock slot: the app's icon (or its first letter) and a marker when it is in front.
     fn slot(&mut self, ui: &mut egui::Ui, tex: Option<egui::TextureHandle>, name: &str, front: bool, dim: bool) -> egui::Response {
         let t = self.theme();
-        let (rect, r) = ui.allocate_exact_size(Vec2::new(SLOT, BAR_HEIGHT), Sense::click());
-        if r.hovered() || front { ui.painter().rect_filled(rect.shrink2(Vec2::new(2.0, 4.0)), 8.0, c(t.accent).gamma_multiply(if front { 0.18 } else { 0.28 })); }
+        let vertical = self.vertical();
+        let size = if vertical { Vec2::new(BAR_W, SLOT) } else { Vec2::new(SLOT, BAR_HEIGHT) };
+        let (rect, r) = ui.allocate_exact_size(size, Sense::click());
+        let pad = if vertical { Vec2::new(6.0, 1.0) } else { Vec2::new(2.0, 4.0) };
+        if r.hovered() || front { ui.painter().rect_filled(rect.shrink2(pad), 8.0, c(t.accent).gamma_multiply(if front { 0.18 } else { 0.28 })); }
         let icon = Rect::from_center_size(rect.center() - vec2(0.0, 1.0), Vec2::splat(ICON));
         let tint = if dim { Color32::from_white_alpha(110) } else { Color32::WHITE };
         match tex {
@@ -564,7 +641,14 @@ impl Bar {
             }
         }
         if front {
-            ui.painter().rect_filled(Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 4.5), vec2(12.0, 2.5)), 1.5, c(t.accent));
+            // The marker for the window in front sits on the bar's outer side.
+            let m = match self.edge() {
+                Edge::Top => Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 4.5), vec2(12.0, 2.5)),
+                Edge::Bottom => Rect::from_center_size(pos2(rect.center().x, rect.top() + 4.5), vec2(12.0, 2.5)),
+                Edge::Left => Rect::from_center_size(pos2(rect.right() - 5.0, rect.center().y), vec2(2.5, 12.0)),
+                Edge::Right => Rect::from_center_size(pos2(rect.left() + 5.0, rect.center().y), vec2(2.5, 12.0)),
+            };
+            ui.painter().rect_filled(m, 1.5, c(t.accent));
         }
         r
     }
@@ -579,14 +663,14 @@ impl Bar {
             let name = self.app_name(p);
             let tex = self.icon(ui.ctx(), p);
             let r = self.slot(ui, tex, &name, false, false).on_hover_text(format!("{name}\nright-click to unpin"));
-            if r.clicked() && !dock::launch(p) { self.toggle_popup(Popup::Launcher, 40.0); }
+            if r.clicked() && !dock::launch(p) { self.toggle_popup(Popup::Launcher, 40.0 + self.thick()); }
             if r.secondary_clicked() { unpin = Some(i); }
         }
         if let Some(i) = unpin { self.unpin(i); }
         slots = slots.saturating_sub(pinned.len());
         if pinned.is_empty() {
             let r = self.chip(ui, Some("pin apps".into()), false, |p, g| glyph::draw(p, g, Glyph::Apps, c(t.muted)));
-            if r.on_hover_text("Open the Ronin launcher and click Pin next to an app").clicked() { self.toggle_popup(Popup::Launcher, 40.0); }
+            if r.on_hover_text("Open the Ronin launcher and click Pin next to an app").clicked() { self.toggle_popup(Popup::Launcher, 40.0 + self.thick()); }
             slots = slots.saturating_sub(3);
         }
         if !self.wins.is_empty() && slots > 0 { self.divider(ui); }
@@ -614,6 +698,7 @@ impl Bar {
     }
 
     fn bar(&mut self, ui: &mut egui::Ui) {
+        if self.vertical() { return self.bar_vertical(ui) }
         let t = self.theme();
         let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
         let (fg, muted, accent) = (c(t.fg), c(t.muted), c(t.accent));
@@ -638,7 +723,7 @@ impl Bar {
             p.circle_filled(pos2(x0 + tw + 5.0, clock.center().y), 1.6, accent);
             p.galley(pos2(x0 + tw + 10.0, clock.center().y - dh / 2.0 + 0.5), date, muted);
         }
-        if cr.clicked() { self.toggle_popup(Popup::Calendar, clock.center().x); }
+        if cr.clicked() { self.toggle_popup(Popup::Calendar, self.along(clock)); }
 
         ui.horizontal_centered(|ui| {
             ui.add_space(6.0);
@@ -646,7 +731,7 @@ impl Bar {
             let (mr, m) = ui.allocate_exact_size(vec2(40.0, BAR_HEIGHT), Sense::click());
             if m.hovered() { ui.painter().rect_filled(mr.shrink2(vec2(2.0, 4.0)), 9.0, c(t.surface)); }
             glyph::mark(ui.painter(), Rect::from_center_size(mr.center(), Vec2::splat(30.0)), accent, fg);
-            if m.clicked() { self.toggle_popup(Popup::Launcher, mr.center().x); }
+            if m.clicked() { self.toggle_popup(Popup::Launcher, self.along(mr)); }
             if m.secondary_clicked() { self.popup = None; self.panel = !self.panel; }
             ui.add_space(4.0);
 
@@ -665,76 +750,131 @@ impl Bar {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(6.0);
-                let lit = |tab: Tab| self.panel && self.tab == tab;
-                let (ls, lt, lw) = (lit(Tab::Settings), lit(Tab::Themes), lit(Tab::Wallpapers));
-                let pw = self.chip(ui, None, self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
-                if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, pw.rect.center().x); }
-                self.divider(ui);
-                if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
-                // Shown only while a new version is waiting.
-                let newer = self.upd.lock().ok().and_then(|u| u.latest.as_ref().map(|r| r.version));
-                if let Some(v) = newer {
-                    let r = self.chip(ui, None, self.popup == Some(Popup::Update), |p, g| glyph::draw(p, g, Glyph::Update, accent));
-                    if r.on_hover_text(format!("Ronin Bar {v} is available")).clicked() { self.toggle_popup(Popup::Update, self.screen_w - 210.0); }
-                }
-                if self.chip(ui, None, lt, |p, g| glyph::draw(p, g, Glyph::Theme, fg)).clicked() { self.open(Tab::Themes); }
-                let wall = self.chip(ui, None, lw, |p, g| glyph::draw(p, g, Glyph::Wallpaper, fg));
-                if wall.clicked() { self.open(Tab::Wallpapers); }
-                if wall.secondary_clicked() { self.step_wallpaper(1); }
-                self.divider(ui);
-                if let Some((v, m)) = s.volume {
-                    let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
-                    let r = self.chip(ui, Some(text), self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
-                    if r.clicked() { self.toggle_popup(Popup::Sound, r.rect.center().x); }
-                    if r.secondary_clicked() || r.middle_clicked() { self.set_mute(!m); }
-                    if r.hovered() {
-                        // One wheel notch = 5 %.
-                        let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
-                            egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
-                        if dy != 0.0 { self.set_volume(v + dy.signum() * 0.05); }
-                    }
-                }
-                if let Some((b, charging)) = s.battery {
-                    let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
-                    if r.clicked() { self.toggle_popup(Popup::Battery, r.rect.center().x); }
-                }
-                // Quick settings: airplane mode, night light, hotspot and the rest.
-                let r = self.chip(ui, None, self.popup == Some(Popup::Quick), |p, g| glyph::draw(p, g, Glyph::Toggles, fg)).on_hover_text("Quick settings");
-                if r.clicked() { self.toggle_popup(Popup::Quick, r.rect.center().x); }
-                // Bluetooth and Wi-Fi, each with its own popup.
-                let (wifi_on, bt_on, wifi_net) = self.net.lock().map(|n| (n.wifi_on, n.bluetooth_on, n.connected.clone())).unwrap_or((None, None, None));
-                if let Some(on) = bt_on {
-                    let r = self.chip(ui, None, self.popup == Some(Popup::Bluetooth), |p, g| glyph::quick(p, g.shrink(1.0), glyph::Quick::Bluetooth, if on { fg } else { muted })).on_hover_text(if on { "Bluetooth on" } else { "Bluetooth off" });
-                    if r.clicked() { self.toggle_popup(Popup::Bluetooth, r.rect.center().x); }
-                }
-                let tip = match &wifi_net { Some((n, q)) => format!("Wi-Fi: {n} ({q}%)"), None if wifi_on == Some(false) => "Wi-Fi is off".into(), None if s.online => "Connected by cable".into(), None => "Not connected".into() };
-                let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, wifi_net.is_some() || s.online, fg, muted)).on_hover_text(tip);
-                if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, r.rect.center().x); }
-                self.divider(ui);
-                // Pomodoro: the time left while it runs, just the icon while it is waiting.
-                let now = Instant::now();
-                let p = &self.pomodoro;
-                // While in use: "Write the report · 24:59" (a long task is shortened), or just the time.
-                let text = (p.is_running() || p.done > Duration::ZERO).then(|| {
-                    if p.task.is_empty() { p.label(now) } else {
-                        let mut short: String = p.task.chars().take(18).collect();
-                        if p.task.chars().count() > 18 { short.push('…'); }
-                        format!("{short} · {}", p.label(now))
-                    }
-                });
-                let col = if p.phase == Phase::Break { accent } else { fg };
-                let r = self.chip(ui, text, self.popup == Some(Popup::Focus), |pt, g| glyph::draw(pt, g, Glyph::Timer, col));
-                let tip = if p.task.is_empty() { "Focus timer".to_string() } else { format!("Focus timer: {}", p.task) };
-                if r.on_hover_text(tip).clicked() { self.toggle_popup(Popup::Focus, self.screen_w - 420.0); }
-                self.divider(ui);
-                if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
-                if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
+                self.controls(ui, &s);
             });
         });
 
-        // A fine accent line along the bottom edge.
-        let y = full.bottom() - 0.5;
+        // A fine accent line along the side that faces the windows.
+        let y = if self.edge() == Edge::Bottom { full.top() + 0.5 } else { full.bottom() - 0.5 };
         ui.painter().line_segment([pos2(full.left(), y), pos2(full.right(), y)], Stroke::new(1.0, accent.gamma_multiply(0.45)));
+    }
+
+    /// The controls at the far end of the bar, from the power button inwards (right to left on a
+    /// top or bottom bar, bottom to top on a side bar).
+    fn controls(&mut self, ui: &mut egui::Ui, s: &worker::Stats) {
+        let t = self.theme();
+        let (fg, muted, accent) = (c(t.fg), c(t.muted), c(t.accent));
+        let lit = |tab: Tab| self.panel && self.tab == tab;
+        let (ls, lt, lw) = (lit(Tab::Settings), lit(Tab::Themes), lit(Tab::Wallpapers));
+        let pw = self.chip(ui, None, self.popup == Some(Popup::Power), |p, g| glyph::draw(p, g, Glyph::Power, accent));
+        if pw.clicked() { self.confirm = None; self.toggle_popup(Popup::Power, self.along(pw.rect)); }
+        self.divider(ui);
+        if self.chip(ui, None, ls, |p, g| glyph::draw(p, g, Glyph::Gear, fg)).clicked() { self.open(Tab::Settings); }
+        // Shown only while a new version is waiting.
+        let newer = self.upd.lock().ok().and_then(|u| u.latest.as_ref().map(|r| r.version));
+        if let Some(v) = newer {
+            let r = self.chip(ui, None, self.popup == Some(Popup::Update), |p, g| glyph::draw(p, g, Glyph::Update, accent));
+            if r.on_hover_text(format!("Ronin Bar {v} is available")).clicked() { self.toggle_popup(Popup::Update, self.anchor_end(210.0)); }
+        }
+        if self.chip(ui, None, lt, |p, g| glyph::draw(p, g, Glyph::Theme, fg)).clicked() { self.open(Tab::Themes); }
+        let wall = self.chip(ui, None, lw, |p, g| glyph::draw(p, g, Glyph::Wallpaper, fg));
+        if wall.clicked() { self.open(Tab::Wallpapers); }
+        if wall.secondary_clicked() { self.step_wallpaper(1); }
+        self.divider(ui);
+        if let Some((v, m)) = s.volume {
+            let text = if m { "mute".to_string() } else { format!("{:.0}", v * 100.0) };
+            let r = self.chip(ui, Some(text), self.popup == Some(Popup::Sound), |p, g| glyph::volume(p, g, v, m, fg));
+            if r.clicked() { self.toggle_popup(Popup::Sound, self.along(r.rect)); }
+            if r.secondary_clicked() || r.middle_clicked() { self.set_mute(!m); }
+            if r.hovered() {
+                // One wheel notch = 5 %.
+                let dy: f32 = ui.input(|i| i.raw.events.iter().filter_map(|e| match e {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y), _ => None }).sum());
+                if dy != 0.0 { self.set_volume(v + dy.signum() * 0.05); }
+            }
+        }
+        if let Some((b, charging)) = s.battery {
+            let r = self.chip(ui, Some(format!("{b}%")), self.popup == Some(Popup::Battery), |p, g| glyph::battery(p, g, b, charging, fg, accent));
+            if r.clicked() { self.toggle_popup(Popup::Battery, self.along(r.rect)); }
+        }
+        // Quick settings: airplane mode, night light, hotspot and the rest.
+        let r = self.chip(ui, None, self.popup == Some(Popup::Quick), |p, g| glyph::draw(p, g, Glyph::Toggles, fg)).on_hover_text("Quick settings");
+        if r.clicked() { self.toggle_popup(Popup::Quick, self.along(r.rect)); }
+        // Bluetooth and Wi-Fi, each with its own popup.
+        let (wifi_on, bt_on, wifi_net) = self.net.lock().map(|n| (n.wifi_on, n.bluetooth_on, n.connected.clone())).unwrap_or((None, None, None));
+        if let Some(on) = bt_on {
+            let r = self.chip(ui, None, self.popup == Some(Popup::Bluetooth), |p, g| glyph::quick(p, g.shrink(1.0), glyph::Quick::Bluetooth, if on { fg } else { muted })).on_hover_text(if on { "Bluetooth on" } else { "Bluetooth off" });
+            if r.clicked() { self.toggle_popup(Popup::Bluetooth, self.along(r.rect)); }
+        }
+        let tip = match &wifi_net { Some((n, q)) => format!("Wi-Fi: {n} ({q}%)"), None if wifi_on == Some(false) => "Wi-Fi is off".into(), None if s.online => "Connected by cable".into(), None => "Not connected".into() };
+        let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, wifi_net.is_some() || s.online, fg, muted)).on_hover_text(tip);
+        if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, self.along(r.rect)); }
+        self.divider(ui);
+        // Pomodoro: the time left while it runs, just the icon while it is waiting.
+        let now = Instant::now();
+        let p = &self.pomodoro;
+        // While in use: "Write the report · 24:59" (a long task is shortened), or just the time.
+        let text = (p.is_running() || p.done > Duration::ZERO).then(|| {
+            if p.task.is_empty() { p.label(now) } else {
+                let mut short: String = p.task.chars().take(18).collect();
+                if p.task.chars().count() > 18 { short.push('…'); }
+                format!("{short} · {}", p.label(now))
+            }
+        });
+        let col = if p.phase == Phase::Break { accent } else { fg };
+        let r = self.chip(ui, text, self.popup == Some(Popup::Focus), |pt, g| glyph::draw(pt, g, Glyph::Timer, col));
+        let tip = if p.task.is_empty() { "Focus timer".to_string() } else { format!("Focus timer: {}", p.task) };
+        if r.on_hover_text(tip).clicked() { self.toggle_popup(Popup::Focus, self.anchor_end(420.0)); }
+        self.divider(ui);
+        if self.chip(ui, Some(format!("{}%", s.ram)), false, |p, g| glyph::draw(p, g, Glyph::Ram, muted)).clicked() { sys::task_manager(); }
+        if self.chip(ui, Some(format!("{}%", s.cpu)), false, |p, g| glyph::draw(p, g, Glyph::Cpu, muted)).clicked() { sys::task_manager(); }
+    }
+
+    /// The bar standing on the left or right of the screen: the Ronin mark and the clock at the
+    /// top, then the dock, and the controls from the bottom up.
+    fn bar_vertical(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let s = self.stats.lock().map(|s| s.clone()).unwrap_or_default();
+        let (fg, muted, accent) = (c(t.fg), c(t.muted), c(t.accent));
+        let full = ui.max_rect();
+        // Controls first, from the bottom, so the dock knows how much room is left above them.
+        let controls_top = ui.scope_builder(egui::UiBuilder::new().max_rect(full.shrink2(vec2(0.0, 6.0))).layout(egui::Layout::bottom_up(egui::Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+            self.controls(ui, &s);
+            ui.min_rect().top()
+        }).inner;
+        let upper = Rect::from_min_max(full.min + vec2(0.0, 6.0), pos2(full.max.x, controls_top - 6.0));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(upper).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+            ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+            // The Ronin mark is the Start button; right-click opens Ronin's own panel.
+            let (mr, m) = ui.allocate_exact_size(vec2(BAR_W, 40.0), Sense::click());
+            if m.hovered() { ui.painter().rect_filled(mr.shrink2(vec2(5.0, 2.0)), 9.0, c(t.surface)); }
+            glyph::mark(ui.painter(), Rect::from_center_size(mr.center(), Vec2::splat(30.0)), accent, fg);
+            if m.clicked() { self.toggle_popup(Popup::Launcher, self.along(mr)); }
+            if m.secondary_clicked() { self.popup = None; self.panel = !self.panel; }
+            // The clock, hours over minutes; click for the calendar.
+            let (cr, cresp) = ui.allocate_exact_size(vec2(BAR_W, 42.0), Sense::click());
+            let (_, d, mo, h, mi) = sys::local_time();
+            if cresp.hovered() { ui.painter().rect_filled(cr.shrink2(vec2(5.0, 1.0)), 9.0, c(t.surface)); }
+            ui.painter().text(cr.center() - vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{h:02}"), FontId::proportional(15.0), fg);
+            ui.painter().text(cr.center() + vec2(0.0, 9.0), egui::Align2::CENTER_CENTER, format!("{mi:02}"), FontId::proportional(15.0), accent);
+            if cresp.on_hover_text(format!("{d}/{mo}")).clicked() { self.toggle_popup(Popup::Calendar, self.along(cr)); }
+            self.divider(ui);
+            // The dock, on a soft island.
+            let island = ui.painter().add(egui::Shape::Noop);
+            let y0 = ui.cursor().min.y;
+            let room = (ui.available_height() - 8.0).max(0.0);
+            self.dock_items(ui, room);
+            let y1 = ui.cursor().min.y;
+            if y1 - y0 > 10.0 {
+                let r = Rect::from_min_max(pos2(full.left() + 4.0, y0 - 2.0), pos2(full.right() - 4.0, y1));
+                ui.painter().set(island, egui::Shape::rect_filled(r, 11.0, c(t.surface).gamma_multiply(0.55)));
+            }
+        });
+        // A fine accent line along the side that faces the windows.
+        let x = if self.edge() == Edge::Left { full.right() - 0.5 } else { full.left() + 0.5 };
+        ui.painter().line_segment([pos2(x, full.top()), pos2(x, full.bottom())], Stroke::new(1.0, accent.gamma_multiply(0.45)));
+        let _ = muted;
     }
 
     // ───── popups ─────
@@ -1559,9 +1699,16 @@ impl Bar {
                 }
                 ui.label(RichText::new("Hides the Windows taskbar while Ronin Bar runs; it comes back when you quit or uninstall. The Ronin mark opens your apps, the clock the calendar, and the icons on the right Wi-Fi, Bluetooth, quick settings, battery and sound.").color(c(t.muted)).size(12.0));
                 ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label("Bar position");
+                    for e in EDGES {
+                        if ui.selectable_label(self.edge() == e, e.name()).clicked() { self.set_edge(e); }
+                    }
+                });
+                ui.add_space(6.0);
                 let mut auto = self.settings.auto_hide;
-                if ui.checkbox(&mut auto, "Hide the bar when not in use").changed() { self.set_auto_hide(auto); }
-                ui.label(RichText::new("The bar slides up out of the way and comes back when the mouse touches the top edge of the screen; windows then use the whole screen. It always steps aside for fullscreen videos and games.").color(c(t.muted)).size(12.0));
+                if ui.checkbox(&mut auto, "Hide the bar when a window needs the space").changed() { self.set_auto_hide(auto); }
+                ui.label(RichText::new("The bar stays while nothing is under it. When a window reaches under it (maximised, or moved against its edge), it hides completely so it never covers that window's buttons; rest the mouse at the edge for half a second to bring it back. Windows can then use the whole screen. Untick to keep the bar always in place, with windows next to it. It always steps aside for fullscreen videos and games.").color(c(t.muted)).size(12.0));
                 ui.add_space(6.0);
                 let mut start = self.settings.start_with_windows;
                 if ui.checkbox(&mut start, "Start with Windows").changed() {
@@ -1734,12 +1881,12 @@ impl Bar {
     fn popup_window(&mut self, ctx: &egui::Context) {
         if let Some(p) = self.popup { self.popup_size = popup_size(p); }
         let (w, h) = self.popup_size;
-        let x = (self.popup_x - w / 2.0).clamp(8.0, (self.screen_w - w - 8.0).max(8.0));
+        let pos = self.popup_pos(self.popup_x, w, h);
         let builder = egui::ViewportBuilder::default()
             .with_title(POPUP_TITLE)
             .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
             .with_visible(self.popup.is_some())
-            .with_inner_size([w, h]).with_position(egui::pos2(x, BAR_HEIGHT + 6.0));
+            .with_inner_size([w, h]).with_position(pos);
         let id = egui::ViewportId::from_hash_of("ronin-popup");
         self.popup_live = true;
         let fresh = self.popup.is_some() && self.popup_at.elapsed() < Duration::from_millis(120);
@@ -1773,7 +1920,7 @@ impl Bar {
         if self.upd_seen != Some(v) {
             self.upd_seen = Some(v);
             if self.settings.auto_update { self.upd_install = true; update::fetch(self.upd.clone(), self.ctx.clone()); }
-            else if self.settings.update_popup && self.popup.is_none() && !self.panel && !fullscreen { self.toggle_popup(Popup::Update, self.screen_w - 210.0); }
+            else if self.settings.update_popup && self.popup.is_none() && !self.panel && !fullscreen { self.toggle_popup(Popup::Update, self.anchor_end(210.0)); }
         }
         if let Some(path) = ready {
             if self.upd_install && !fullscreen {
@@ -1900,7 +2047,7 @@ impl Bar {
     fn release(&mut self) {
         if let Some(h) = self.hwnd.take() {
             sys::appbar_remove(h);
-            sys::release_top(self.bar_px);
+            sys::release_edge(self.edge(), self.bar_px);
         }
         self.show_taskbar();
         if self.settings.night_light { sys::night_light(0); }
@@ -1935,7 +2082,14 @@ impl eframe::App for Bar {
         });
         if self.panel {
             let (w, h) = (580.0, 640.0);
-            let pos = egui::pos2((self.screen_w - w - 10.0).max(0.0), BAR_HEIGHT + 8.0);
+            // Next to the bar, at its far end (where the gear and the other page buttons are).
+            let t = self.thick();
+            let pos = match self.edge() {
+                Edge::Top => egui::pos2((self.screen_w - w - 10.0).max(0.0), t + 8.0),
+                Edge::Bottom => egui::pos2((self.screen_w - w - 10.0).max(0.0), (self.screen_h - t - 8.0 - h).max(0.0)),
+                Edge::Left => egui::pos2(t + 8.0, (self.screen_h - h - 10.0).max(0.0)),
+                Edge::Right => egui::pos2((self.screen_w - t - 8.0 - w).max(0.0), (self.screen_h - h - 10.0).max(0.0)),
+            };
             let builder = egui::ViewportBuilder::default()
                 .with_title(PANEL_TITLE)
                 .with_decorations(false).with_taskbar(false).with_always_on_top().with_resizable(false)
