@@ -64,7 +64,9 @@ Each open window shows its own app's icon and name (hover to see it), even when 
 
 The bar matches each window to the app Windows has it registered as. When a new version is released, an **update** arrow also appears on the bar (see [Updates](#updates)).
 
-The bar steps aside while a fullscreen game or video is in front, and comes back after it.
+**It stays out of your way:**
+- **Auto-hide** (on by default): when the mouse leaves the bar, it slides up and leaves a thin line at the top edge. Touch the top of the screen and it slides back. It stays put while a popup or the panel is open. Windows use the whole screen. To keep the bar always showing, untick **Settings → Hide the bar when not in use**.
+- **Fullscreen**: the bar disappears completely while a fullscreen video, game or presentation is in front, and comes back after.
 
 ## Focus timer
 
@@ -240,6 +242,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.9.0** | The bar hides itself when not in use and comes back at the top edge of the screen; it disappears completely for fullscreen videos, games and presentations |
 | **0.8.1** | Wallpapers download and change at once: no waiting before a clicked picture, 4 at a time for categories, and the bar never pauses while the wallpaper is applied |
 | **0.8.0** | Focus timer: a Pomodoro on the bar (25 min focus, 5 min break) with Start, Pause and Reset, and the task you're working on shown next to the time |
 | **0.7.3** | Wallpapers, Themes and Settings each open as their own page from their bar button; Settings shows only settings |

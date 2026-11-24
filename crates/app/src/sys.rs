@@ -343,12 +343,13 @@ fn work_area() -> RECT {
 }
 
 /// Keeps the bar at the very top of the main screen, full width, if anything moved it.
-pub fn pin_top(hwnd: HWND, height_px: i32) {
+/// `y` is 0 when the bar is shown, and above the screen's edge while it is slid away.
+pub fn pin_top(hwnd: HWND, height_px: i32, y: i32) {
     let (w, _, _) = primary_screen();
     let mut r = RECT::default();
     unsafe {
-        if GetWindowRect(hwnd, &mut r).is_ok() && (r.left != 0 || r.top != 0 || r.right != w || r.bottom != height_px) {
-            let _ = SetWindowPos(hwnd, None, 0, 0, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
+        if GetWindowRect(hwnd, &mut r).is_ok() && (r.left != 0 || r.top != y || r.right != w || r.bottom != y + height_px) {
+            let _ = SetWindowPos(hwnd, None, 0, y, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
         }
     }
 }
@@ -481,6 +482,12 @@ pub fn appbar_remove(hwnd: HWND) {
 
 /// True while a fullscreen app or game covers the primary screen (the bar then steps back).
 pub fn fullscreen_app_active() -> bool {
+    use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
+    // Windows' own answer (it uses it to hold back notifications): a fullscreen app, video, game
+    // or presentation is in front.
+    if let Ok(s) = unsafe { SHQueryUserNotificationState() } {
+        if s == QUNS_BUSY || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE { return true }
+    }
     unsafe {
         let fg = GetForegroundWindow();
         if fg.is_invalid() || fg == GetDesktopWindow() || fg == GetShellWindow() { return false }

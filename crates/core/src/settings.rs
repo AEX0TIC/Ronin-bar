@@ -29,6 +29,8 @@ pub struct Settings {
     pub pinned: Vec<String>,
     /// Hide the Windows taskbar while Ronin Bar runs (it comes back when the bar quits).
     pub hide_taskbar: bool,
+    /// Slide the bar away when the mouse is not on it (it comes back at the top edge of the screen).
+    pub auto_hide: bool,
     /// Ronin's night light (a warmer screen), and how strong it is in percent.
     pub night_light: bool,
     pub night_strength: u8,
@@ -44,7 +46,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
     }
 }
 
