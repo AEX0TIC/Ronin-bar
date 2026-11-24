@@ -303,37 +303,50 @@ pub fn primary_screen() -> (i32, i32, f32) {
     }
 }
 
-/// The bar's strip got taller or shorter (the screen's scale changed): reserve the new strip.
-pub fn appbar_resize(hwnd: HWND, height_px: i32) {
-    unsafe {
-        let mut d = appbar_data(hwnd);
-        let (w, _, _) = primary_screen();
-        d.rc = RECT { left: 0, top: 0, right: w, bottom: height_px };
-        SHAppBarMessage(ABM_SETPOS, &mut d);
-        let _ = SetWindowPos(hwnd, None, 0, 0, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
-    }
-    keep_top_free(height_px);
+// ───── the bar's place on the screen ─────
+use ronin_core::edge::Edge;
+
+fn abe(edge: Edge) -> u32 {
+    use windows::Win32::UI::Shell::{ABE_BOTTOM, ABE_LEFT, ABE_RIGHT};
+    match edge { Edge::Top => ABE_TOP, Edge::Bottom => ABE_BOTTOM, Edge::Left => ABE_LEFT, Edge::Right => ABE_RIGHT }
 }
 
-fn appbar_data(hwnd: HWND) -> APPBARDATA {
-    APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: ABE_TOP, ..Default::default() }
+fn appbar_data(hwnd: HWND, edge: Edge) -> APPBARDATA {
+    APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: hwnd, uEdge: abe(edge), ..Default::default() }
 }
 
-/// Reserves a strip at the top of the primary screen for the bar, so maximised windows stay below
-/// it (like a second taskbar), and moves the bar there. Returns false if Windows refused.
-pub fn appbar_register(hwnd: HWND, height_px: i32) -> bool {
+fn strip(edge: Edge, thick: i32, hide: i32) -> RECT {
+    let (sw, sh, _) = primary_screen();
+    let (x, y, w, h) = edge.strip(sw, sh, thick, hide);
+    RECT { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// Reserves a strip along `edge` of the primary screen for the bar, so maximised windows stay
+/// clear of it (like a second taskbar), and moves the bar there. Returns false if Windows refused.
+pub fn appbar_register(hwnd: HWND, edge: Edge, thick: i32) -> bool {
     unsafe {
-        let mut d = appbar_data(hwnd);
+        let mut d = appbar_data(hwnd, edge);
         if SHAppBarMessage(ABM_NEW, &mut d) == 0 { return false }
-        let (w, _, _) = primary_screen();
-        // Always the very top of the screen. (Windows' suggested spot can be lower, e.g. while a bar
-        // that was closed without saying goodbye still holds the top; the bar must not sit under it.)
-        d.rc = RECT { left: 0, top: 0, right: w, bottom: height_px };
+        // Always right at the screen's edge. (Windows' suggested spot can be further in, e.g. while
+        // a bar that was closed without saying goodbye still holds the edge.)
+        d.rc = strip(edge, thick, 0);
         SHAppBarMessage(ABM_SETPOS, &mut d);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, w, height_px, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let r = d.rc;
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     }
-    keep_top_free(height_px);
+    keep_free(edge, thick);
     true
+}
+
+/// The bar's strip got thicker or thinner (the screen's scale changed): reserve the new strip.
+pub fn appbar_resize(hwnd: HWND, edge: Edge, thick: i32) {
+    unsafe {
+        let mut d = appbar_data(hwnd, edge);
+        d.rc = strip(edge, thick, 0);
+        SHAppBarMessage(ABM_SETPOS, &mut d);
+    }
+    place(hwnd, edge, thick, 0);
+    keep_free(edge, thick);
 }
 
 fn work_area() -> RECT {
@@ -342,34 +355,57 @@ fn work_area() -> RECT {
     r
 }
 
-/// Keeps the bar at the very top of the main screen, full width, if anything moved it.
-/// `y` is 0 when the bar is shown, and above the screen's edge while it is slid away.
-pub fn pin_top(hwnd: HWND, height_px: i32, y: i32) {
-    let (w, _, _) = primary_screen();
+/// Moves the bar to its edge, full length, slid `hide` pixels off the screen (0 = shown), if
+/// anything else moved it.
+pub fn place(hwnd: HWND, edge: Edge, thick: i32, hide: i32) {
+    let want = strip(edge, thick, hide);
     let mut r = RECT::default();
     unsafe {
-        if GetWindowRect(hwnd, &mut r).is_ok() && (r.left != 0 || r.top != y || r.right != w || r.bottom != y + height_px) {
-            let _ = SetWindowPos(hwnd, None, 0, y, w, height_px, SWP_NOACTIVATE | SWP_NOZORDER);
+        if GetWindowRect(hwnd, &mut r).is_ok() && r != want {
+            let _ = SetWindowPos(hwnd, None, want.left, want.top, want.right - want.left, want.bottom - want.top, SWP_NOACTIVATE | SWP_NOZORDER);
         }
     }
 }
 
-/// Makes the work area of the main screen start exactly where the bar ends, so maximised windows
-/// (with their title bar, tabs, and close / minimise / maximise buttons) sit right below the bar:
-/// not under it, and without a gap. Returns true if it had to change anything.
-pub fn keep_top_free(height_px: i32) -> bool {
-    let mut r = work_area();
-    if r.top == height_px || r.right <= r.left { return false }
-    r.top = height_px;
+/// The work area's side along `edge`, in screen pixels, and what it is when `thick` is kept free.
+fn side(r: &mut RECT, edge: Edge) -> &mut i32 {
+    match edge { Edge::Top => &mut r.top, Edge::Bottom => &mut r.bottom, Edge::Left => &mut r.left, Edge::Right => &mut r.right }
+}
+fn side_value(edge: Edge, thick: i32) -> i32 {
+    let (sw, sh, _) = primary_screen();
+    match edge { Edge::Top => thick, Edge::Bottom => sh - thick, Edge::Left => thick, Edge::Right => sw - thick }
+}
+
+fn set_work_area(mut r: RECT) {
     unsafe { let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SPIF_SENDCHANGE); }
+}
+
+/// Makes the work area of the main screen end exactly where the bar begins along `edge` (0 =
+/// nothing kept free), so maximised windows (title bar and buttons included) sit right next to
+/// the bar: not under it, and without a gap. Returns true if it had to change anything.
+pub fn keep_free(edge: Edge, thick: i32) -> bool {
+    let mut r = work_area();
+    let want = side_value(edge, thick);
+    if *side(&mut r, edge) == want || r.right <= r.left { return false }
+    *side(&mut r, edge) = want;
+    set_work_area(r);
     true
 }
 
-/// True for a maximised window on the main screen whose top edge is not where the bar ends
-/// (it was maximised before the bar took its place, so its title bar is under the bar or there is
-/// a gap). Only once the work area itself is right, so fixing it can never loop.
-pub fn misfit_maximized(raw: isize, height_px: i32) -> bool {
-    if work_area().top != height_px { return false }
+/// Gives the strip along `edge` back to other windows (the bar quits or moves to another edge).
+pub fn release_edge(edge: Edge, thick: i32) {
+    let mut r = work_area();
+    if *side(&mut r, edge) != side_value(edge, thick) { return }
+    *side(&mut r, edge) = side_value(edge, 0);
+    set_work_area(r);
+}
+
+/// True for a maximised window on the main screen that does not fill the work area exactly along
+/// the bar's edge (it was maximised before the bar took its place, so it is under the bar or
+/// leaves a gap). Only once the work area itself is right, so fixing it can never loop.
+pub fn misfit_maximized(raw: isize, edge: Edge, thick: i32) -> bool {
+    let mut wa = work_area();
+    if *side(&mut wa, edge) != side_value(edge, thick) { return false }
     unsafe {
         let h = HWND(raw as *mut c_void);
         let primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
@@ -378,8 +414,8 @@ pub fn misfit_maximized(raw: isize, height_px: i32) -> bool {
         let mut r = RECT::default();
         let visible = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(h, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
             &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32).is_ok();
-        if !visible { let _ = GetWindowRect(h, &mut r); r.top += 8; }
-        (r.top - height_px).abs() > 2
+        if !visible { let _ = GetWindowRect(h, &mut r); r.top += 8; r.left += 8; r.right -= 8; r.bottom -= 8; }
+        (*side(&mut r, edge) - side_value(edge, thick)).abs() > 2
     }
 }
 
@@ -392,12 +428,36 @@ pub fn refit(raw: isize) {
     }
 }
 
-/// Gives the top strip back to other windows (when the bar quits).
-pub fn release_top(height_px: i32) {
-    let mut r = work_area();
-    if r.top != height_px { return }
-    r.top = 0;
-    unsafe { let _ = SystemParametersInfoW(SPI_SETWORKAREA, 0, Some(&mut r as *mut RECT as *mut c_void), SPIF_SENDCHANGE); }
+/// True when the window in front (another app's) reaches into the bar's strip, so the bar would
+/// cover part of it: a maximised window, or one dragged against that edge.
+pub fn window_under(edge: Edge, thick: i32) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_invalid() || fg == GetDesktopWindow() || fg == GetShellWindow() || IsIconic(fg).as_bool() || !IsWindowVisible(fg).as_bool() { return false }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, Some(&mut pid));
+        if pid == windows::Win32::System::Threading::GetCurrentProcessId() { return false }
+        // The desktop itself (Explorer's wallpaper window) is not "a window under the bar".
+        let mut class = [0u16; 64];
+        let n = GetClassNameW(fg, &mut class) as usize;
+        let cls = String::from_utf16_lossy(&class[..n.min(64)]);
+        if cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" { return false }
+        let mut r = RECT::default();
+        let visible = windows::Win32::Graphics::Dwm::DwmGetWindowAttribute(fg, windows::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut r as *mut RECT as *mut c_void, std::mem::size_of::<RECT>() as u32).is_ok();
+        if !visible && GetWindowRect(fg, &mut r).is_err() { return false }
+        let s = strip(edge, thick, 0);
+        r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top
+    }
+}
+
+/// Where the mouse is, if it touches any edge of the main screen (x, y in pixels).
+pub fn cursor_at_edge() -> Option<(i32, i32)> {
+    let mut p = windows::Win32::Foundation::POINT::default();
+    unsafe { GetCursorPos(&mut p).ok()?; }
+    let (w, h, _) = primary_screen();
+    let inside = p.x >= 0 && p.x < w && p.y >= 0 && p.y < h;
+    (inside && (p.x <= 1 || p.y <= 1 || p.x >= w - 2 || p.y >= h - 2)).then_some((p.x, p.y))
 }
 
 // ───── the Windows taskbar ─────
@@ -477,7 +537,7 @@ pub fn task_manager() {
 }
 
 pub fn appbar_remove(hwnd: HWND) {
-    unsafe { let mut d = appbar_data(hwnd); SHAppBarMessage(ABM_REMOVE, &mut d); }
+    unsafe { let mut d = appbar_data(hwnd, Edge::Top); SHAppBarMessage(ABM_REMOVE, &mut d); }
 }
 
 /// True while a fullscreen app or game covers the primary screen (the bar then steps back).
@@ -502,26 +562,6 @@ pub fn fullscreen_app_active() -> bool {
         let m = mi.rcMonitor;
         r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom
     }
-}
-
-/// A maximised window is in front on the main screen (its title-bar buttons are then at the
-/// top edge, where the bar would come down).
-pub fn maximized_in_front() -> bool {
-    unsafe {
-        let fg = GetForegroundWindow();
-        if fg.is_invalid() || !IsZoomed(fg).as_bool() { return false }
-        let primary = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-        MonitorFromWindow(fg, windows::Win32::Graphics::Gdi::MONITOR_DEFAULTTONEAREST) == primary
-    }
-}
-
-/// Where the mouse is along the top edge of the main screen (its x in pixels), or None when it
-/// is not touching that edge.
-pub fn cursor_at_top() -> Option<i32> {
-    let mut p = windows::Win32::Foundation::POINT::default();
-    unsafe { GetCursorPos(&mut p).ok()?; }
-    let (w, _, _) = primary_screen();
-    (p.y <= 1 && p.x >= 0 && p.x < w).then_some(p.x)
 }
 
 /// Puts the bar above or below other windows.

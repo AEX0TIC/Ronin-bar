@@ -31,6 +31,8 @@ pub struct Settings {
     pub hide_taskbar: bool,
     /// Slide the bar away when the mouse is not on it (it comes back at the top edge of the screen).
     pub auto_hide: bool,
+    /// Which side of the screen the bar is on: "top", "bottom", "left" or "right".
+    pub bar_edge: String,
     /// Ronin's night light (a warmer screen), and how strong it is in percent.
     pub night_light: bool,
     pub night_strength: u8,
@@ -46,7 +48,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, bar_edge: "top".into(), night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
     }
 }
 
@@ -54,6 +56,8 @@ impl Default for Settings {
 pub const AUTO_CHANGE_CHOICES: [u32; 5] = [0, 15, 30, 60, 180];
 
 impl Settings {
+    pub fn edge(&self) -> crate::edge::Edge { crate::edge::Edge::parse(&self.bar_edge) }
+
     /// Parses settings; anything unreadable becomes the default, and bad values are corrected.
     pub fn from_json(text: &str) -> Settings {
         let mut s: Settings = serde_json::from_str(text).unwrap_or_default();
@@ -65,6 +69,7 @@ impl Settings {
         s.hidden_apps.truncate(500);
         s.launch_counts.retain(|(a, _)| crate::dock::pinnable(a));
         s.launch_counts.truncate(200);
+        s.bar_edge = crate::edge::Edge::parse(&s.bar_edge).id().to_string();
         s.pinned = crate::dock::clean_pins(std::mem::take(&mut s.pinned));
         s
     }
