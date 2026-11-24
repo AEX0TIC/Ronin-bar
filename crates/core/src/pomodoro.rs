@@ -41,15 +41,15 @@ pub fn phase_len(&self) -> Duration{
     }
 
     pub fn elapsed(&self, now: Instant) -> Duration{
-        let since_start = match.self.started {
+        let since_start = match self.started {
             Some(start) => now.saturating_duration_since(start),
-            None => duration::ZERO
+            None => Duration::ZERO
         };
         self.done + since_start
     }
 
     pub fn remaining(&self, now: Instant) -> Duration {
-        self.phase_len().saurating_sub(self.elapsed(now))
+        self.phase_len().saturating_sub(self.elapsed(now))
     }
 
     pub fn start(&mut self, now: Instant) {
@@ -65,7 +65,7 @@ pub fn phase_len(&self) -> Duration{
     }
 
     pub fn reset (&mut self) {
-        self.phase = Phase::focus;
+        self.phase = Phase::Focus;
         self.started = None;
         self.done = Duration::ZERO;
     }
@@ -73,8 +73,8 @@ pub fn phase_len(&self) -> Duration{
     pub fn tick(&mut self, now: Instant) -> bool{
         if self.is_running() && self.remaining(now).is_zero() {
             self.phase = match self.phase {
-                Phase::Focus => Phase::Break
-                Phase::Break => Phase::Focus
+                Phase::Focus => Phase::Break,
+                Phase::Break => Phase::Focus,
             };
 
             self.done = Duration::ZERO;
@@ -86,7 +86,7 @@ pub fn phase_len(&self) -> Duration{
 
     pub fn label(&self, now: Instant) -> String {
         let secs = self.remaining(now).as_secs();
-        format!("{:02}:{02}", secs / 60, secs % 60)
+        format!("{:02}:{:02}", secs / 60, secs % 60)
     }
 }
 
