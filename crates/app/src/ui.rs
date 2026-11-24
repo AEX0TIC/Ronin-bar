@@ -62,6 +62,8 @@ pub struct Bar {
     /// The wallpaper whose full picture is downloading, and where the download reports back.
     fetching: Option<String>,
     fetched: download::Fetched,
+    /// Sets the desktop wallpaper on a thread of its own.
+    wall_tx: Sender<std::path::PathBuf>,
     fetch_error: Option<String>,
     stats: Arc<Mutex<worker::Stats>>,
     tx: Sender<worker::Cmd>,
@@ -184,13 +186,13 @@ impl Bar {
         let packs = Arc::new(Mutex::new(store.load_packs()));
         let progress = Arc::new(Mutex::new(download::Progress::default()));
         let (w, h, scale) = sys::primary_screen();
-        download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone());
+        download::originals(store.clone(), (w.max(16) as u32, h.max(16) as u32), settings.theme.clone(), originals.clone(), cc.egui_ctx.clone());
         if settings.night_light { let _ = tx.send(worker::Cmd::Night(settings.night_strength)); }
         if catalog.lock().map(|l| l.len()).unwrap_or(0) < COLLECTIONS.len() * PER_COLLECTION {
-            download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone());
+            download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
-        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
+        Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
               popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
@@ -251,16 +253,16 @@ impl Bar {
         let Some(w) = self.walls().into_iter().find(|w| w.id == id) else { return };
         let file = self.store.wallpaper_file(&w);
         if file.is_file() {
-            if sys::set_wallpaper(&file) {
-                self.settings.wallpaper = w.id;
-                self.last_change = Instant::now();
-                self.save();
-            }
+            // Shown as chosen at once; Windows applies it a moment later on its own thread.
+            let _ = self.wall_tx.send(file);
+            self.settings.wallpaper = w.id;
+            self.last_change = Instant::now();
+            self.save();
         } else if !w.url.is_empty() && art::original_theme(&w.id).is_none() {
             self.last_change = Instant::now();
             self.fetch_error = None;
             self.fetching = Some(w.id.clone());
-            download::full(self.store.clone(), w, self.fetched.clone());
+            download::full(self.store.clone(), w, self.fetched.clone(), self.ctx.clone());
         }
     }
 
@@ -1619,7 +1621,7 @@ impl Bar {
             ui.label(RichText::new("That wallpaper could not be downloaded. Try again in a minute.").color(c(t.accent)).size(12.0)).on_hover_text(e.clone());
         }
         if !p.running && downloaded < COLLECTIONS.len() * PER_COLLECTION && ui.button("Get the anime wallpapers").clicked() {
-            download::run(self.store.clone(), self.catalog.clone(), self.progress.clone(), self.settings.wallpaper.clone());
+            download::run(self.store.clone(), self.catalog.clone(), self.progress.clone(), self.settings.wallpaper.clone(), self.ctx.clone());
         }
         ui.add_space(4.0);
         let ctx = ui.ctx().clone();
@@ -1649,7 +1651,7 @@ impl Bar {
                                 let next = (p.files.len() - items.len()).min(download::BATCH);
                                 let label = if items.is_empty() { format!("get {next} (about {} MB)", next * 2) } else { format!("get {next} more (about {} MB)", next * 2) };
                                 if ui.small_button(label).clicked() {
-                                    download::pack(self.store.clone(), p, self.packs.clone(), self.pack_states.clone());
+                                    download::pack(self.store.clone(), p, self.packs.clone(), self.pack_states.clone(), self.ctx.clone());
                                 }
                                 if let Some(e) = st.error { ui.label(RichText::new("some failed, try again").color(c(t.accent)).size(12.0)).on_hover_text(e); }
                             }

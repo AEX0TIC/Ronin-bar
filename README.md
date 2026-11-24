@@ -240,6 +240,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.8.1** | Wallpapers download and change at once: no waiting before a clicked picture, 4 at a time for categories, and the bar never pauses while the wallpaper is applied |
 | **0.8.0** | Focus timer: a Pomodoro on the bar (25 min focus, 5 min break) with Start, Pause and Reset, and the task you're working on shown next to the time |
 | **0.7.3** | Wallpapers, Themes and Settings each open as their own page from their bar button; Settings shows only settings |
 | **0.7.2** | The bar follows the screen's real scale: proper height and width after a scale or monitor change, and the panel and popups open in the right place |
