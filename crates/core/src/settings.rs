@@ -33,6 +33,11 @@ pub struct Settings {
     pub auto_hide: bool,
     /// Which side of the screen the bar is on: "top", "bottom", "left" or "right".
     pub bar_edge: String,
+    /// The focus timer's last choice: "pomodoro" or "timer", which Pomodoro round (0 = 25 + 5,
+    /// 1 = 50 + 10), and the timer's length in minutes (0 = count up with no limit).
+    pub focus_mode: String,
+    pub focus_preset: usize,
+    pub timer_minutes: u32,
     /// Ronin's night light (a warmer screen), and how strong it is in percent.
     pub night_light: bool,
     pub night_strength: u8,
@@ -48,7 +53,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, bar_edge: "top".into(), night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, bar_edge: "top".into(), focus_mode: "pomodoro".into(), focus_preset: 0, timer_minutes: 60, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
     }
 }
 
@@ -70,6 +75,8 @@ impl Settings {
         s.launch_counts.retain(|(a, _)| crate::dock::pinnable(a));
         s.launch_counts.truncate(200);
         s.bar_edge = crate::edge::Edge::parse(&s.bar_edge).id().to_string();
+        if s.focus_mode != "timer" { s.focus_mode = "pomodoro".into(); }
+        if s.focus_preset >= crate::pomodoro::PRESETS.len() { s.focus_preset = 0; }
         s.pinned = crate::dock::clean_pins(std::mem::take(&mut s.pinned));
         s
     }

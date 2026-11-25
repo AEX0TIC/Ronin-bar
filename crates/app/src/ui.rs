@@ -6,7 +6,7 @@ use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
 use ronin_core::wallhaven::{self, Wallpaper, COLLECTIONS, PER_COLLECTION};
 use ronin_core::{art, dock as pins, github};
-use ronin_core::pomodoro::{Phase, Pomodoro};
+use ronin_core::pomodoro::{Mode, Phase, Pomodoro, PRESETS};
 use ronin_core::edge::{Edge, EDGES};
 use std::collections::HashMap;
 use std::sync::{mpsc::Sender, Arc, Mutex};
@@ -155,7 +155,19 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (320.0, 300.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (340.0, 400.0) }
+}
+
+/// The focus timer as the settings describe it: a Pomodoro round, or a timer of the saved length.
+fn focus_timer(s: &Settings) -> Pomodoro {
+    let mut p = Pomodoro::new(25, 5);
+    if s.focus_mode == "timer" {
+        p.set_timer(Duration::from_secs(u64::from(s.timer_minutes) * 60));
+    } else {
+        let (f, b) = PRESETS[s.focus_preset.min(PRESETS.len() - 1)];
+        p.set_pomodoro(f, b);
+    }
+    p
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -202,8 +214,9 @@ impl Bar {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
         let long_ago = Instant::now() - Duration::from_secs(5);
+        let pomodoro_init = focus_timer(&settings);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_hide: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: Pomodoro::new(25, 5), focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: pomodoro_init, focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, screen_h: h as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -814,14 +827,14 @@ impl Bar {
         let now = Instant::now();
         let p = &self.pomodoro;
         // While in use: "Write the report · 24:59" (a long task is shortened), or just the time.
-        let text = (p.is_running() || p.done > Duration::ZERO).then(|| {
+        let text = if p.finished() { Some("Done".to_string()) } else { (p.is_running() || p.done > Duration::ZERO).then(|| {
             if p.task.is_empty() { p.label(now) } else {
                 let mut short: String = p.task.chars().take(18).collect();
                 if p.task.chars().count() > 18 { short.push('…'); }
                 format!("{short} · {}", p.label(now))
             }
-        });
-        let col = if p.phase == Phase::Break { accent } else { fg };
+        }) };
+        let col = if p.phase == Phase::Break || p.finished() { accent } else { fg };
         let r = self.chip(ui, text, self.popup == Some(Popup::Focus), |pt, g| glyph::draw(pt, g, Glyph::Timer, col));
         let tip = if p.task.is_empty() { "Focus timer".to_string() } else { format!("Focus timer: {}", p.task) };
         if r.on_hover_text(tip).clicked() { self.toggle_popup(Popup::Focus, self.anchor_end(420.0)); }
@@ -1966,18 +1979,65 @@ impl Bar {
     }
 
     /// The focus timer's popup: the time left, and Start / Pause / Reset.
+    /// Sets the timer up the way the settings say (Pomodoro round or timer length), keeping the task.
+    fn apply_focus_choice(&mut self) {
+        let task = std::mem::take(&mut self.pomodoro.task);
+        self.pomodoro = focus_timer(&self.settings);
+        self.pomodoro.task = task;
+    }
+
+    /// The focus timer's popup: Pomodoro or Timer, the time left, and Start / Pause / Reset.
     fn pop_focus(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let now = Instant::now();
-        let phase = match self.pomodoro.phase { Phase::Focus => "Focus", Phase::Break => "Break" };
+        let running = self.pomodoro.is_running();
+        let timer = self.pomodoro.mode == Mode::Timer;
+        let title = if timer {
+            if self.pomodoro.finished() { "Time's up" } else if self.pomodoro.counts_up() { "Stopwatch" } else { "Timer" }
+        } else {
+            match self.pomodoro.phase { Phase::Focus => "Focus", Phase::Break => "Break" }
+        };
         ui.horizontal(|ui| {
             let (r, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
             glyph::draw(ui.painter(), r, Glyph::Timer, c(t.accent));
-            ui.label(RichText::new(phase).strong().size(15.0));
+            ui.label(RichText::new(title).strong().size(15.0));
         });
         ui.add_space(6.0);
+        // The choice, while it is not running: Pomodoro (25 + 5 or 50 + 10) or a timer of any length.
+        if !running {
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                for (label, id) in [("Pomodoro", "pomodoro"), ("Timer", "timer")] {
+                    if ui.selectable_label(self.settings.focus_mode == id, label).clicked() && self.settings.focus_mode != id {
+                        self.settings.focus_mode = id.into();
+                        changed = true;
+                    }
+                }
+            });
+            ui.add_space(2.0);
+            if self.settings.focus_mode == "timer" {
+                ui.horizontal(|ui| {
+                    let mut h = self.settings.timer_minutes / 60;
+                    let mut m = self.settings.timer_minutes % 60;
+                    let a = ui.add(egui::DragValue::new(&mut h).range(0..=9999).suffix(" h"));
+                    let b = ui.add(egui::DragValue::new(&mut m).range(0..=59).suffix(" min"));
+                    if a.changed() || b.changed() { self.settings.timer_minutes = h * 60 + m; changed = true; }
+                });
+                ui.label(RichText::new("Drag or type the hours and minutes. 0 h 0 min counts up with no limit.").color(c(t.muted)).size(11.0));
+            } else {
+                ui.horizontal(|ui| {
+                    for (k, (f, b)) in PRESETS.iter().enumerate() {
+                        if ui.selectable_label(self.settings.focus_preset == k, format!("{f} min + {b} break")).clicked() && self.settings.focus_preset != k {
+                            self.settings.focus_preset = k;
+                            changed = true;
+                        }
+                    }
+                });
+            }
+            if changed { self.save(); self.apply_focus_choice(); }
+            ui.add_space(4.0);
+        }
         // What you are working on: typed before Start (Enter starts too); shown while it runs.
-        let running = self.pomodoro.is_running();
         let mut enter = false;
         if running {
             let task = if self.pomodoro.task.is_empty() { "No task named".to_string() } else { self.pomodoro.task.clone() };
@@ -1985,11 +2045,11 @@ impl Bar {
         } else {
             if self.focus_draft.is_empty() && !self.pomodoro.task.is_empty() { self.focus_draft = self.pomodoro.task.clone(); }
             let field = ui.add(egui::TextEdit::singleline(&mut self.focus_draft).hint_text("What are you working on?").char_limit(ronin_core::pomodoro::MAX_TASK).desired_width(f32::INFINITY).margin(vec2(8.0, 6.0)));
-            if self.popup_at.elapsed() < Duration::from_millis(300) { field.request_focus(); }
             enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         }
         ui.add_space(4.0);
-        ui.vertical_centered(|ui| { ui.label(RichText::new(self.pomodoro.label(now)).size(44.0).strong()); });
+        let big = if self.pomodoro.finished() { c(t.accent) } else { c(t.fg) };
+        ui.vertical_centered(|ui| { ui.label(RichText::new(self.pomodoro.label(now)).size(44.0).strong().color(big)); });
         ui.add_space(10.0);
         let w = (ui.available_width() - 8.0) / 2.0;
         ui.horizontal(|ui| {
@@ -2003,7 +2063,13 @@ impl Bar {
             if ui.add_sized([w, 34.0], egui::Button::new(RichText::new("Reset").size(14.0))).clicked() { self.pomodoro.reset(); }
         });
         ui.add_space(6.0);
-        ui.label(RichText::new("25 minutes of focus, then a 5-minute break.").color(c(t.muted)).size(12.0));
+        let note = if timer {
+            if self.pomodoro.counts_up() { "Counts up for as long as you like.".to_string() } else { "Stops when the time is up.".to_string() }
+        } else {
+            let (f, b) = (self.pomodoro.focus_len.as_secs() / 60, self.pomodoro.break_len.as_secs() / 60);
+            format!("{f} minutes of focus, then a {b}-minute break starts by itself.")
+        };
+        ui.label(RichText::new(note).color(c(t.muted)).size(12.0));
     }
 
     fn pop_update(&mut self, ui: &mut egui::Ui) {
