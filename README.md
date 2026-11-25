@@ -72,11 +72,19 @@ The bar matches each window to the app Windows has it registered as. When a new 
 
 ## Focus timer
 
-Click the stopwatch on the bar for a Pomodoro timer: **25 minutes of focus, then a 5-minute break**, over and over.
+Click the stopwatch on the bar. Choose how you want to work:
+
+| | |
+|---|---|
+| **Pomodoro 25 + 5** | 25 minutes of focus, then a 5-minute break starts by itself, then focus again |
+| **Pomodoro 50 + 10** | 50 minutes of focus, then a 10-minute break starts by itself, then focus again |
+| **Timer** | Any length: set the hours (no practical limit) and minutes; it stops when the time is up and the bar shows **Done** |
+| **Timer at 0 h 0 min** | Counts up, as a stopwatch, for as long as you like |
 
 - Type **what you're working on** first ("Write the report"), then press **Start** or **Enter**.
-- While it runs, the bar shows the task and the time left: `Write the report · 24:59`. During a break the stopwatch turns your theme's colour.
-- **Pause** keeps the time you've done; **Start** carries on from there. **Reset** goes back to a fresh focus and keeps your task for the next round.
+- While it runs, the bar shows the task and the time: `Write the report · 24:59`, with hours once there are any (`1:30:00`). During a break, or when a timer is done, the stopwatch turns your theme's colour.
+- **Pause** keeps the time you've done; **Start** carries on from there. **Reset** starts again and keeps your task.
+- Your choice (Pomodoro round or timer length) is remembered for next time.
 
 ## Wi-Fi and Bluetooth
 
@@ -244,6 +252,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.11.0** | Focus timer: Pomodoro 25 + 5 or 50 + 10 (the break starts by itself), or a timer of any length, which can also count up with no limit |
 | **0.10.0** | Bar on the top, bottom, left or right of the screen; auto-hide gives way only when a window needs the space, so the bar never covers a window unless you call it |
 | **0.9.0** | The bar hides itself when not in use and comes back at the top edge of the screen; it disappears completely for fullscreen videos, games and presentations |
 | **0.8.1** | Wallpapers download and change at once: no waiting before a clicked picture, 4 at a time for categories, and the bar never pauses while the wallpaper is applied |
