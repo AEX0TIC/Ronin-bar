@@ -25,6 +25,7 @@ It's a single `.exe` with no admin rights and no extra apps to install (no Glaze
 ## Contents
 
 - [The bar](#the-bar)
+- [Media notch](#media-notch)
 - [Focus timer](#focus-timer)
 - [Wi-Fi and Bluetooth](#wi-fi-and-bluetooth)
 - [Quick settings](#quick-settings)
@@ -69,6 +70,15 @@ The bar matches each window to the app Windows has it registered as. When a new 
 **It stays out of your way:**
 - **Hide the bar when a window needs the space** (on by default): while nothing is under the bar (the desktop, or windows away from its edge) it stays, covering nothing. When the window in front reaches under it (maximised, or moved against that edge), it hides completely, so it never sits on that window's title bar or close, minimise and maximise buttons. To bring it back on purpose, rest the mouse at that edge for half a second (on the top or right edge, not the corner where window buttons are). Windows can use the whole screen. Untick it to keep the bar always in place, with windows next to it.
 - **Fullscreen**: the bar disappears completely while a fullscreen video, game or presentation is in front, and comes back after.
+
+## Media notch
+
+When anything plays (Spotify, YouTube in Brave or Chrome, Netflix, VLC, Media Player, any app that shows in Windows' own media box), the clock's pill in the middle of the bar **grows into a notch**: the album art or video picture, the title and artist (gliding sideways when it is long), and small bars that move while it plays. When playback stops, it shrinks back to the clock.
+
+- **Click the notch** for the player: a large picture, title, artist and app, a progress bar that moves smoothly with the music (click or drag it to jump), and **previous · play / pause · next**.
+- **Middle-click the notch** to play or pause without opening it.
+- **In sync with Windows:** Ronin follows Windows' media sessions, so a new song, play / pause or a jump shows the moment it happens. Between the player's reports, the position is worked out from the exact moment it was last given, so the bar glides and stays in step with the player.
+- On a left or right bar, what is playing is a small picture among the controls; hover it for the title, click it for the player.
 
 ## Focus timer
 
@@ -252,6 +262,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.12.0** | Media notch: the clock's pill grows into what is playing, with a smooth, in-sync player to play, pause, skip and seek |
 | **0.11.0** | Focus timer: Pomodoro 25 + 5 or 50 + 10 (the break starts by itself), or a timer of any length, which can also count up with no limit |
 | **0.10.0** | Bar on the top, bottom, left or right of the screen; auto-hide gives way only when a window needs the space, so the bar never covers a window unless you call it |
 | **0.9.0** | The bar hides itself when not in use and comes back at the top edge of the screen; it disappears completely for fullscreen videos, games and presentations |

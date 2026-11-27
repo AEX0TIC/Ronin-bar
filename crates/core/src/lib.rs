@@ -9,6 +9,7 @@ pub mod dock;
 pub mod edge;
 pub mod github;
 pub mod launcher;
+pub mod media;
 pub mod pomodoro;
 pub mod night;
 pub mod settings;

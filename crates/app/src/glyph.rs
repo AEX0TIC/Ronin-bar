@@ -229,3 +229,39 @@ pub fn quick(p: &Painter, r: Rect, q: Quick, col: Color32) {
         Quick::Back => poly(&[(2.0, -4.5), (-2.5, 0.0), (2.0, 4.5)], false),
     }
 }
+
+/// Media buttons.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Play { Start, Pause, Prev, Next, Note }
+
+pub fn play(p: &Painter, r: Rect, k: Play, col: Color32) {
+    let c = r.center();
+    let u = r.width().min(r.height()) / 16.0;
+    let tri = |dx: f32, flip: bool| {
+        let s = if flip { -1.0 } else { 1.0 };
+        vec![c + vec2(dx - 3.5 * s, -5.0) * u, c + vec2(dx + 4.5 * s, 0.0) * u, c + vec2(dx - 3.5 * s, 5.0) * u]
+    };
+    match k {
+        Play::Start => { p.add(Shape::convex_polygon(tri(0.8, false), col, Stroke::NONE)); }
+        Play::Pause => {
+            p.rect_filled(Rect::from_center_size(c + vec2(-2.6, 0.0) * u, vec2(2.8 * u, 10.5 * u)), 0.9 * u, col);
+            p.rect_filled(Rect::from_center_size(c + vec2(2.6, 0.0) * u, vec2(2.8 * u, 10.5 * u)), 0.9 * u, col);
+        }
+        Play::Next => {
+            p.add(Shape::convex_polygon(tri(-1.6, false).into_iter().map(|q| q + vec2(0.0, 0.0)).collect(), col, Stroke::NONE));
+            p.rect_filled(Rect::from_center_size(c + vec2(5.0, 0.0) * u, vec2(1.8 * u, 10.0 * u)), 0.6 * u, col);
+        }
+        Play::Prev => {
+            p.add(Shape::convex_polygon(tri(1.6, true), col, Stroke::NONE));
+            p.rect_filled(Rect::from_center_size(c + vec2(-5.0, 0.0) * u, vec2(1.8 * u, 10.0 * u)), 0.6 * u, col);
+        }
+        Play::Note => {
+            let s = Stroke::new(1.4 * u.max(0.9), col);
+            p.circle_filled(c + vec2(-3.4, 4.2) * u, 2.4 * u, col);
+            p.circle_filled(c + vec2(4.0, 2.6) * u, 2.4 * u, col);
+            p.line_segment([c + vec2(-1.2, 4.2) * u, c + vec2(-1.2, -5.6) * u], s);
+            p.line_segment([c + vec2(6.2, 2.6) * u, c + vec2(6.2, -7.2) * u], s);
+            p.line_segment([c + vec2(-1.2, -5.6) * u, c + vec2(6.2, -7.2) * u], Stroke::new(2.0 * u, col));
+        }
+    }
+}
