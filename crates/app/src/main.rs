@@ -10,6 +10,7 @@
 #[cfg(windows)] mod download;
 #[cfg(windows)] mod glyph;
 #[cfg(windows)] mod install;
+#[cfg(windows)] mod media;
 #[cfg(windows)] mod net;
 #[cfg(windows)] mod store;
 #[cfg(windows)] mod sys;

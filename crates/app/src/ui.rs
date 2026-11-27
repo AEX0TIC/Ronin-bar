@@ -1,6 +1,6 @@
 //! The dock across the top of the screen and its control panel.
 use crate::glyph::{self, Glyph};
-use crate::{bt, dock, download, install, net, store::Store, sys, update, worker};
+use crate::{bt, dock, download, install, media, net, store::Store, sys, update, worker};
 use eframe::egui::{self, pos2, vec2, Color32, FontId, Rect, RichText, Sense, Stroke, Vec2};
 use ronin_core::settings::{Settings, AUTO_CHANGE_CHOICES};
 use ronin_core::theme::{self, Theme, THEMES};
@@ -24,13 +24,15 @@ pub const BAR_W: f32 = 52.0;
 const ICON: f32 = 20.0;
 const SLOT: f32 = 34.0;
 const CLOCK_W: f32 = 170.0;
+/// How much wider the clock's pill grows while something plays.
+const MEDIA_W: f32 = 260.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab { Wallpapers, Themes, Settings }
 
 /// Ronin's own popups, opened from the bar in place of Windows' flyouts.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Bluetooth, Quick, Update, Focus }
+enum Popup { Launcher, Calendar, Sound, Power, Battery, Network, Bluetooth, Quick, Update, Focus, Media }
 
 /// The pages of the quick settings popup.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -133,6 +135,13 @@ pub struct Bar {
     /// The Pomodoro focus timer (its logic is in ronin_core::pomodoro), and the task being typed
     /// into its popup before Start.
     pomodoro: Pomodoro,
+    /// What is playing (its own thread), its picture on the GPU, a drag on the progress bar, and
+    /// the last thing played (shown while the notch shrinks away).
+    media: media::Shared,
+    media_tx: Sender<media::MediaCmd>,
+    media_tex: Option<(u64, egui::TextureHandle)>,
+    media_seek: Option<f32>,
+    media_last: Option<media::Media>,
     focus_draft: String,
     tab: Tab,
     confirm: Option<Confirm>,
@@ -155,7 +164,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (340.0, 400.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (340.0, 400.0), Popup::Media => (400.0, 236.0) }
 }
 
 /// The focus timer as the settings describe it: a Pomodoro round, or a timer of the saved length.
@@ -168,6 +177,14 @@ fn focus_timer(s: &Settings) -> Pomodoro {
         p.set_pomodoro(f, b);
     }
     p
+}
+
+/// Texture coordinates that cut a square from the middle of a picture (so wide video stills and
+/// square album covers both fill a square neatly).
+fn cover_uv(size: [usize; 2]) -> Rect {
+    let (w, h) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    if w > h { let f = h / w; Rect::from_min_max(pos2((1.0 - f) / 2.0, 0.0), pos2((1.0 + f) / 2.0, 1.0)) }
+    else { let f = w / h; Rect::from_min_max(pos2(0.0, (1.0 - f) / 2.0), pos2(1.0, (1.0 + f) / 2.0)) }
 }
 
 fn c(rgb: [u8; 3]) -> Color32 { Color32::from_rgb(rgb[0], rgb[1], rgb[2]) }
@@ -202,6 +219,7 @@ impl Bar {
         cc.egui_ctx.all_styles_mut(|s| { s.spacing.button_padding = vec2(10.0, 5.0); s.spacing.item_spacing = vec2(8.0, 6.0); });
         let (stats, tx) = worker::start(cc.egui_ctx.clone());
         let (net, net_tx) = net::start(cc.egui_ctx.clone());
+        let (media, media_tx) = media::start(cc.egui_ctx.clone());
         let (bt, bt_tx) = bt::start(cc.egui_ctx.clone());
         let catalog = Arc::new(Mutex::new(store.load_catalog()));
         let originals = Arc::new(Mutex::new(Vec::new()));
@@ -216,7 +234,7 @@ impl Bar {
         let long_ago = Instant::now() - Duration::from_secs(5);
         let pomodoro_init = focus_timer(&settings);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_hide: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: pomodoro_init, focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: pomodoro_init, media, media_tx, media_tex: None, media_seek: None, media_last: None, focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, screen_h: h as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -718,8 +736,18 @@ impl Bar {
         let full = ui.max_rect();
         ui.spacing_mut().item_spacing.x = 2.0;
 
-        // Clock in the middle: click for notifications and the calendar.
-        let clock = Rect::from_center_size(full.center(), vec2(CLOCK_W, BAR_HEIGHT));
+        // Clock in the middle, in a pill that grows smoothly into a media notch while something
+        // plays (and shrinks back when it stops). Click the time for the calendar, the media part
+        // for the player.
+        let playing_now = self.media.lock().ok().and_then(|m| m.clone());
+        if playing_now.is_some() { self.media_last = playing_now.clone(); }
+        let grow = ui.ctx().animate_bool_with_time(egui::Id::unique("ronin-media-notch"), playing_now.is_some(), 0.28);
+        let notch = Rect::from_center_size(full.center(), vec2(CLOCK_W + MEDIA_W * grow, BAR_HEIGHT));
+        if grow > 0.01 { ui.painter().rect_filled(notch.shrink2(vec2(4.0, 5.0)), 13.0, c(t.surface).gamma_multiply(0.95 * grow)); }
+        let clock = Rect::from_min_size(notch.min, vec2(CLOCK_W, BAR_HEIGHT));
+        if grow > 0.01 {
+            if let Some(m) = self.media_last.clone() { self.notch_media(ui, Rect::from_min_max(pos2(clock.right(), notch.top()), notch.max), &m, grow); }
+        }
         let cr = ui.interact(clock, ui.scope_id().with("clock"), Sense::click());
         {
             let (wd, d, mo, h, mi) = sys::local_time();
@@ -823,6 +851,19 @@ impl Bar {
         let r = self.chip(ui, None, self.popup == Some(Popup::Network), |p, g| glyph::network(p, g, wifi_net.is_some() || s.online, fg, muted)).on_hover_text(tip);
         if r.clicked() { self.joining = None; self.toggle_popup(Popup::Network, self.along(r.rect)); }
         self.divider(ui);
+        // On a side bar there is no room for the notch: what is playing is a small picture here.
+        if self.vertical() {
+            if let Some(m) = self.media.lock().ok().and_then(|m| m.clone()) {
+                let tex = self.art_tex(&ui.ctx().clone(), &m);
+                let tip = if m.artist.is_empty() { m.title.clone() } else { format!("{} · {}", m.title, m.artist) };
+                let r = self.chip(ui, Some(tip), self.popup == Some(Popup::Media), |p, g| match &tex {
+                    Some(tex) => { p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(g.expand(4.0), 5.0, Color32::WHITE).with_texture(tex.id(), cover_uv(tex.size())))); }
+                    None => glyph::play(p, g, glyph::Play::Note, accent),
+                });
+                if r.clicked() { self.toggle_popup(Popup::Media, self.along(r.rect)); }
+                if r.middle_clicked() { self.media_toggle(); }
+            }
+        }
         // Pomodoro: the time left while it runs, just the icon while it is waiting.
         let now = Instant::now();
         let p = &self.pomodoro;
@@ -888,6 +929,153 @@ impl Bar {
         let x = if self.edge() == Edge::Left { full.right() - 0.5 } else { full.left() + 0.5 };
         ui.painter().line_segment([pos2(x, full.top()), pos2(x, full.bottom())], Stroke::new(1.0, accent.gamma_multiply(0.45)));
         let _ = muted;
+    }
+
+    // ───── what is playing ─────
+
+    /// The picture of what is playing, uploaded once per picture.
+    fn art_tex(&mut self, ctx: &egui::Context, m: &media::Media) -> Option<egui::TextureHandle> {
+        let art = m.art.as_ref()?;
+        if let Some((id, tex)) = &self.media_tex { if *id == m.art_id { return Some(tex.clone()) } }
+        let tex = ctx.load_texture("ronin-media-art", egui::ColorImage::from_rgba_unmultiplied([art.0, art.1], &art.2), egui::TextureOptions::LINEAR);
+        self.media_tex = Some((m.art_id, tex.clone()));
+        Some(tex)
+    }
+
+    /// Changes what the bar shows at once (the player confirms a moment later).
+    fn media_now(&self, f: impl FnOnce(&mut media::Media)) {
+        if let Ok(mut s) = self.media.lock() {
+            if let Some(m) = s.as_mut() { let p = m.position(); m.position = p; m.at = Some(Instant::now()); f(m); }
+        }
+    }
+
+    fn media_toggle(&self) {
+        self.media_now(|m| m.playing = !m.playing);
+        let _ = self.media_tx.send(media::MediaCmd::Toggle);
+    }
+
+    /// The media half of the notch: the picture, the title (gliding sideways when it is long),
+    /// and small bars that move while it plays.
+    fn notch_media(&mut self, ui: &mut egui::Ui, rect: Rect, m: &media::Media, grow: f32) {
+        let t = self.theme();
+        let ctx = ui.ctx().clone();
+        let r = ui.interact(rect, ui.scope_id().with("media-notch"), Sense::click());
+        let fade = |col: Color32| col.gamma_multiply(grow);
+        let p = ui.painter().with_clip_rect(rect.shrink2(vec2(0.0, 5.0)));
+        let cy = rect.center().y;
+        // The picture, cut square from the middle.
+        let art_r = Rect::from_center_size(pos2(rect.left() + 12.0, cy), Vec2::splat(22.0));
+        match self.art_tex(&ctx, m) {
+            Some(tex) => {
+                let uv = cover_uv(tex.size());
+                p.add(egui::Shape::Rect(egui::epaint::RectShape::filled(art_r, 6.0, Color32::WHITE.gamma_multiply(grow)).with_texture(tex.id(), uv)));
+            }
+            None => { p.rect_filled(art_r, 6.0, fade(c(t.bg))); glyph::play(&p, art_r.shrink(4.0), glyph::Play::Note, fade(c(t.accent))); }
+        }
+        // Moving bars while it plays, still while paused.
+        let time = ctx.input(|i| i.time) as f32;
+        let eq_x = rect.right() - 26.0;
+        for k in 0..3 {
+            let kf = k as f32;
+            let h = if m.playing { 4.0 + 9.0 * (0.5 + 0.5 * (time * (5.3 + kf * 1.9) + kf * 1.7).sin()) } else { 3.0 };
+            p.rect_filled(Rect::from_center_size(pos2(eq_x + kf * 5.0, cy), vec2(3.0, h)), 1.5, fade(c(t.accent)));
+        }
+        // The title (and artist), gliding when longer than its room.
+        let text_r = Rect::from_min_max(pos2(art_r.right() + 8.0, rect.top()), pos2(eq_x - 10.0, rect.bottom()));
+        let label = if m.artist.is_empty() { m.title.clone() } else { format!("{}  ·  {}", m.title, m.artist) };
+        let gal = p.layout_no_wrap(label, FontId::proportional(12.5), fade(c(t.fg)));
+        let tp = p.with_clip_rect(text_r.intersect(p.clip_rect()));
+        let y = cy - gal.size().y / 2.0;
+        if gal.size().x <= text_r.width() {
+            tp.galley(pos2(text_r.left(), y), gal, fade(c(t.fg)));
+        } else {
+            let lap = gal.size().x + 48.0;
+            let off = if m.playing { (time * 26.0) % lap } else { 0.0 };
+            tp.galley(pos2(text_r.left() - off, y), gal.clone(), fade(c(t.fg)));
+            tp.galley(pos2(text_r.left() - off + lap, y), gal, fade(c(t.fg)));
+        }
+        let tip = format!("{}\n{}{}", m.title, if m.artist.is_empty() { String::new() } else { format!("{}\n", m.artist) }, m.app);
+        let r = r.on_hover_text(tip);
+        if r.clicked() { self.toggle_popup(Popup::Media, self.along(rect)); }
+        if r.middle_clicked() { self.media_toggle(); }
+        // Smooth while playing: a frame every 33 ms (the popup asks for more while it is open).
+        if m.playing && self.bar_hide == 0 { ctx.request_repaint_after(Duration::from_millis(33)); }
+    }
+
+    /// The player popup: big picture, title, artist, app, a progress bar that glides with the
+    /// music (click or drag to jump), and previous / play-pause / next.
+    fn pop_media(&mut self, ui: &mut egui::Ui) {
+        let t = self.theme();
+        let ctx = ui.ctx().clone();
+        let Some(m) = self.media.lock().ok().and_then(|m| m.clone()) else {
+            ui.label(RichText::new("Nothing is playing.").color(c(t.muted)));
+            return
+        };
+        ui.horizontal(|ui| {
+            let (art_r, _) = ui.allocate_exact_size(Vec2::splat(112.0), Sense::hover());
+            match self.art_tex(&ctx, &m) {
+                Some(tex) => { ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::filled(art_r, 12.0, Color32::WHITE).with_texture(tex.id(), cover_uv(tex.size())))); }
+                None => { ui.painter().rect_filled(art_r, 12.0, c(t.surface)); glyph::play(ui.painter(), art_r.shrink(34.0), glyph::Play::Note, c(t.accent)); }
+            }
+            ui.add_space(6.0);
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ui.add(egui::Label::new(RichText::new(&m.title).strong().size(16.0)).wrap());
+                if !m.artist.is_empty() { ui.label(RichText::new(&m.artist).color(c(t.muted)).size(13.0)); }
+                ui.add_space(4.0);
+                ui.label(RichText::new(&m.app).color(c(t.accent)).size(11.5));
+            });
+        });
+        ui.add_space(10.0);
+        // The progress bar.
+        let w = ui.available_width();
+        let (bar, resp) = ui.allocate_exact_size(vec2(w, 16.0), if m.can_seek && !m.end.is_zero() { Sense::click_and_drag() } else { Sense::hover() });
+        let end = m.end.as_secs_f32();
+        let pos = m.position().as_secs_f32();
+        let pointer_frac = resp.interact_pointer_pos().map(|p| ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0));
+        if resp.dragged() { self.media_seek = pointer_frac; }
+        let frac = self.media_seek.unwrap_or(if end > 0.0 { (pos / end).clamp(0.0, 1.0) } else { 0.0 });
+        if (resp.drag_stopped() || resp.clicked()) && end > 0.0 {
+            if let Some(f) = pointer_frac.or(self.media_seek) {
+                let to = Duration::from_secs_f32(end * f);
+                self.media_now(|m| m.position = to);
+                let _ = self.media_tx.send(media::MediaCmd::Seek(to));
+            }
+            self.media_seek = None;
+        }
+        let track = Rect::from_center_size(bar.center(), vec2(bar.width(), 4.0));
+        ui.painter().rect_filled(track, 2.0, c(t.surface));
+        ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(track.left() + track.width() * frac, track.bottom())), 2.0, c(t.accent));
+        if resp.hovered() || resp.dragged() { ui.painter().circle_filled(pos2(track.left() + track.width() * frac, track.center().y), 6.0, c(t.fg)); }
+        ui.horizontal(|ui| {
+            let shown = if end > 0.0 { Duration::from_secs_f32(end * frac) } else { m.position() };
+            ui.label(RichText::new(ronin_core::media::time_label(shown)).color(c(t.muted)).size(11.5));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(if m.end.is_zero() { "live".to_string() } else { ronin_core::media::time_label(m.end) }).color(c(t.muted)).size(11.5));
+            });
+        });
+        // Previous · play / pause · next.
+        ui.add_space(2.0);
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+        let cx = row.center().x;
+        let button = |ui: &mut egui::Ui, center: egui::Pos2, size: f32, k: glyph::Play, main: bool, on: bool, key: &str| -> bool {
+            let r = Rect::from_center_size(center, Vec2::splat(size));
+            let resp = ui.interact(r, ui.scope_id().with(key), if on { Sense::click() } else { Sense::hover() });
+            if main { ui.painter().circle_filled(r.center(), size / 2.0, c(t.accent)); }
+            else if resp.hovered() && on { ui.painter().circle_filled(r.center(), size / 2.0, c(t.surface)); }
+            let ink = if main { c(t.bg) } else if on { c(t.fg) } else { c(t.muted).gamma_multiply(0.5) };
+            glyph::play(ui.painter(), r.shrink(size * 0.26), k, ink);
+            resp.clicked()
+        };
+        if button(ui, pos2(cx - 58.0, row.center().y), 36.0, glyph::Play::Prev, false, m.can_prev, "prev") {
+            let _ = self.media_tx.send(media::MediaCmd::Prev);
+        }
+        if button(ui, row.center(), 46.0, if m.playing { glyph::Play::Pause } else { glyph::Play::Start }, true, true, "toggle") { self.media_toggle(); }
+        if button(ui, pos2(cx + 58.0, row.center().y), 36.0, glyph::Play::Next, false, m.can_next, "next") {
+            let _ = self.media_tx.send(media::MediaCmd::Next);
+        }
+        // Silky while open and playing: every frame.
+        if m.playing { ctx.request_repaint_after(Duration::from_millis(16)); }
     }
 
     // ───── popups ─────
@@ -1911,7 +2099,7 @@ impl Bar {
             };
             egui::Frame::new().fill(c(t.bg)).stroke(Stroke::new(1.0, c(t.accent).gamma_multiply(0.5))).inner_margin(16.0).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Bluetooth => self.pop_bluetooth(ui), Popup::Quick => self.pop_quick(ui), Popup::Update => self.pop_update(ui), Popup::Focus => self.pop_focus(ui) }
+                match p { Popup::Launcher => self.pop_launcher(ui), Popup::Calendar => self.pop_calendar(ui), Popup::Sound => self.pop_sound(ui), Popup::Power => self.pop_power(ui), Popup::Battery => self.pop_battery(ui), Popup::Network => self.pop_network(ui), Popup::Bluetooth => self.pop_bluetooth(ui), Popup::Quick => self.pop_quick(ui), Popup::Update => self.pop_update(ui), Popup::Focus => self.pop_focus(ui), Popup::Media => self.pop_media(ui) }
             });
             // Closes on Escape, or when you click anywhere else, like a desktop panel's menus.
             ui.ctx().input(|i| i.viewport().close_requested() || i.key_pressed(egui::Key::Escape)
