@@ -508,7 +508,9 @@ impl Bar {
             Edge::Right => y > corner,
             _ => true,
         });
-        if covering && resting {
+        // Over a maximised window the bar never comes down by itself; resting at the edge brings
+        // it back only if that is switched on in Settings.
+        if covering && resting && self.settings.reveal_at_edge {
             let since = *self.edge_since.get_or_insert_with(Instant::now);
             if since.elapsed() >= Duration::from_millis(500) { self.inside_at = Instant::now(); }
             else { ctx.request_repaint_after(Duration::from_millis(60)); }
@@ -1930,7 +1932,14 @@ impl Bar {
                 ui.add_space(6.0);
                 let mut auto = self.settings.auto_hide;
                 if ui.checkbox(&mut auto, "Hide the bar when a window needs the space").changed() { self.set_auto_hide(auto); }
-                ui.label(RichText::new("The bar stays while nothing is under it. When a window reaches under it (maximised, or moved against its edge), it hides completely so it never covers that window's buttons; rest the mouse at the edge for half a second to bring it back. Windows can then use the whole screen. Untick to keep the bar always in place, with windows next to it. It always steps aside for fullscreen videos and games.").color(c(t.muted)).size(12.0));
+                ui.label(RichText::new("The bar stays while nothing is under it. When a window reaches under it (maximised, or moved against its edge), it hides completely and stays hidden until that window is no longer in front, so it never covers the window's buttons. Windows can then use the whole screen. Untick to keep the bar always in place, with windows next to it. It always steps aside for fullscreen videos and games.").color(c(t.muted)).size(12.0));
+                if self.settings.auto_hide {
+                    let mut reveal = self.settings.reveal_at_edge;
+                    if ui.checkbox(&mut reveal, "Over a maximised window, bring the bar back when the mouse rests at the edge").changed() {
+                        self.settings.reveal_at_edge = reveal;
+                        self.save();
+                    }
+                }
                 ui.add_space(6.0);
                 let mut start = self.settings.start_with_windows;
                 if ui.checkbox(&mut start, "Start with Windows").changed() {
