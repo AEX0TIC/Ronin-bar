@@ -68,7 +68,7 @@ The bar matches each window to the app Windows has it registered as. When a new 
 **Put it where you like:** Settings → **Bar position**: **Top**, **Bottom**, **Left** or **Right**. On the left or right it stands upright: the Ronin mark and the clock at the top, then your apps, and the controls from the bottom up (percentages show when you hover them). Popups and the panel open next to the bar, on whichever side it is.
 
 **It stays out of your way:**
-- **Hide the bar when a window needs the space** (on by default): while nothing is under the bar (the desktop, or windows away from its edge) it stays, covering nothing. When the window in front reaches under it (maximised, or moved against that edge), it hides completely, so it never sits on that window's title bar or close, minimise and maximise buttons. To bring it back on purpose, rest the mouse at that edge for half a second (on the top or right edge, not the corner where window buttons are). Windows can use the whole screen. Untick it to keep the bar always in place, with windows next to it.
+- **Hide the bar when a window needs the space** (on by default): while nothing is under the bar (the desktop, or windows away from its edge) it stays, covering nothing. When the window in front reaches under it (maximised, or moved against that edge), it hides completely, so it never sits on that window's title bar or close, minimise and maximise buttons. It comes back as soon as that window is no longer in front. (To bring it back over a maximised window by resting the mouse at the edge for half a second, tick that option in Settings.) Windows can use the whole screen. Untick it to keep the bar always in place, with windows next to it.
 - **Fullscreen**: the bar disappears completely while a fullscreen video, game or presentation is in front, and comes back after.
 
 ## Media notch
@@ -263,6 +263,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.12.3** | The bar never comes down over a maximised window; resting at the edge to bring it back is now an option in Settings |
 | **0.12.2** | A compact player card: small picture with title, artist and app, a thin progress bar between the times, and buttons that all fit |
 | **0.12.1** | Survives sleep and wake: a watchdog restarts the bar if it ever ends unexpectedly; safe screen size and timing while the PC wakes |
 | **0.12.0** | Media notch: the clock's pill grows into what is playing, with a smooth, in-sync player to play, pause, skip and seek |
