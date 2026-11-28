@@ -38,9 +38,14 @@ fn restore_dword(path: &str, name: &str, v: Option<u32>) {
 
 // ───── one instance only ─────
 /// True if this is the only Ronin Bar running. The mutex lives as long as the process.
-pub fn single_instance() -> bool {
+pub fn single_instance() -> bool { only_one(w!("Local\\RoninBar.Bar")) }
+
+/// True if this is the only watchdog running (the small process that keeps the bar running).
+pub fn single_watch() -> bool { only_one(w!("Local\\RoninBar.Watch")) }
+
+fn only_one(name: PCWSTR) -> bool {
     unsafe {
-        let Ok(h) = CreateMutexW(None, true, w!("Local\\RoninBar.Bar")) else { return false };
+        let Ok(h) = CreateMutexW(None, true, name) else { return false };
         if windows::Win32::Foundation::GetLastError() == windows::Win32::Foundation::ERROR_ALREADY_EXISTS {
             // Let go of it, so it disappears when the other copy quits (an update waits for that).
             let _ = CloseHandle(h);
@@ -281,6 +286,13 @@ pub fn find_window(title: &str) -> Option<HWND> {
 }
 
 /// The primary monitor's size in physical pixels, and its DPI scale.
+/// A moment `d` ago, or now if the clock does not go back that far (right after the PC starts or
+/// wakes up, "an hour ago" may be before the clock's beginning).
+pub fn ago(d: std::time::Duration) -> std::time::Instant {
+    let now = std::time::Instant::now();
+    now.checked_sub(d).unwrap_or(now)
+}
+
 /// Lets Ronin see the screen in real pixels and each monitor's own scale. Called first thing, so
 /// the size read at start is the real one.
 pub fn dpi_aware() {
@@ -293,9 +305,15 @@ pub fn dpi_aware() {
 pub fn primary_screen() -> (i32, i32, f32) {
     use windows::Win32::Graphics::Gdi::MonitorFromPoint;
     use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    use std::sync::atomic::AtomicI32;
+    // While the screen wakes up (after sleep, or a monitor being plugged in) Windows can briefly
+    // say it is 0 × 0: the last real size is used until it is back.
+    static LAST_W: AtomicI32 = AtomicI32::new(1920);
+    static LAST_H: AtomicI32 = AtomicI32::new(1080);
     unsafe {
-        let w = GetSystemMetrics(SM_CXSCREEN);
-        let h = GetSystemMetrics(SM_CYSCREEN);
+        let (mut w, mut h) = (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        if w >= 320 && h >= 240 { LAST_W.store(w, Ordering::Relaxed); LAST_H.store(h, Ordering::Relaxed); }
+        else { w = LAST_W.load(Ordering::Relaxed); h = LAST_H.load(Ordering::Relaxed); }
         let mon = MonitorFromPoint(windows::Win32::Foundation::POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
         let (mut dx, mut dy) = (0u32, 0u32);
         let dpi = if GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy).is_ok() && dx >= 48 { dx } else { windows::Win32::UI::HiDpi::GetDpiForSystem() };

@@ -49,6 +49,11 @@ fn main() {
         return;
     }
 
+    // The program Windows starts is a small watchdog; the bar itself runs as its child (`--bar`).
+    // If the bar ever ends unexpectedly (for example a graphics driver that drops it while the PC
+    // sleeps), the watchdog starts it again within a second or two.
+    if !std::env::args().any(|a| a == "--bar") { watch(&store); return }
+
     // Right after an update the old copy is still closing: wait for it (up to 15 s).
     let updated = std::env::args().any(|a| a == "--updated");
     let mut alone = sys::single_instance();
@@ -83,7 +88,51 @@ fn main() {
         glow_options: eframe::egui_glow::GlowConfiguration { vsync: false, ..Default::default() },
         ..Default::default()
     };
-    let _ = eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings)))));
+    if eframe::run_native(ui::TITLE, options, Box::new(move |cc| Ok(Box::new(ui::Bar::new(cc, store, settings))))).is_err() {
+        // The window or its drawing could not carry on: tell the watchdog to start the bar again.
+        sys::show_taskbar(None);
+        std::process::exit(3);
+    }
+}
+
+/// Keeps the bar running. A bar that ends normally (Quit, Uninstall, an update, signing out)
+/// exits with 0 and the watchdog ends too. Anything else, a crash included, starts it again after
+/// a short pause that grows if it keeps failing; after 8 failures in 2 minutes it stops and leaves
+/// Windows' own taskbar, so the PC is never left without one.
+#[cfg(windows)]
+fn watch(store: &store::Store) {
+    use std::time::{Duration, Instant};
+    // Right after an update the old watchdog is still closing: wait for it (up to 15 s).
+    let updated = std::env::args().any(|a| a == "--updated");
+    let mut alone = sys::single_watch();
+    for _ in 0..50 {
+        if alone || !updated { break }
+        std::thread::sleep(Duration::from_millis(300));
+        alone = sys::single_watch();
+    }
+    if !alone { return }
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut failures: Vec<Instant> = Vec::new();
+    let mut first = true;
+    loop {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--bar");
+        if first && updated { cmd.arg("--updated"); }
+        first = false;
+        let Ok(mut child) = cmd.spawn() else { return };
+        match child.wait() {
+            Ok(status) if status.success() => return,
+            _ => {}
+        }
+        // It ended unexpectedly: Windows' taskbar comes back until the bar is up again.
+        sys::show_taskbar(store.load_settings().original.and_then(|o| o.taskbar_state));
+        failures.retain(|t| t.elapsed() < Duration::from_secs(120));
+        failures.push(Instant::now());
+        if failures.len() > 8 { return }
+        // 1 s, then 2, 4, 8… (at most 15 s): time for a screen that is still waking up.
+        let pause = Duration::from_secs(1u64 << (failures.len() - 1).min(4)).min(Duration::from_secs(15));
+        std::thread::sleep(pause);
+    }
 }
 
 /// The Ronin logo for the window (the .exe itself gets it from build.rs).

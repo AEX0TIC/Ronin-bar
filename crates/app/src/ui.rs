@@ -231,10 +231,10 @@ impl Bar {
         if catalog.lock().map(|l| l.len()).unwrap_or(0) < COLLECTIONS.len() * PER_COLLECTION {
             download::run(store.clone(), catalog.clone(), progress.clone(), settings.wallpaper.clone(), cc.egui_ctx.clone());
         }
-        let long_ago = Instant::now() - Duration::from_secs(5);
+        let long_ago = sys::ago(Duration::from_secs(5));
         let pomodoro_init = focus_timer(&settings);
         Bar { store, settings, catalog, originals, packs, pack_states: Default::default(), progress, fetching: None, fetched: Arc::new(Mutex::new(None)), wall_tx: sys::wallpaper_setter(), fetch_error: None, stats, tx, hwnd: None, bar_px: 0, bar_hide: 0, inside_at: Instant::now(), edge_since: None, topmost: true, panel: false, popup: None, popup_x: 0.0, popup_at: Instant::now(),
-              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: Instant::now() - UPDATE_EVERY + Duration::from_secs(20), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: pomodoro_init, media, media_tx, media_tex: None, media_seek: None, media_last: None, focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: Instant::now() - Duration::from_secs(3600), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: Instant::now() - Duration::from_secs(60), tab: Tab::Wallpapers,
+              popup_closed: None, cal: { let (y, m, _) = sys::today(); (y, m) }, bright_drag: None, bright_sent: Instant::now(), vol_drag: None, styled: "", popup_live: false, popup_size: (330.0, 392.0), quick_view: QuickView::Main, from_quick: false, quick_note: None, sticky: false, upd: Default::default(), upd_at: sys::ago(UPDATE_EVERY - Duration::from_secs(20)), upd_seen: None, upd_install: false, ctx: cc.egui_ctx.clone(), pomodoro: pomodoro_init, media, media_tx, media_tex: None, media_seek: None, media_last: None, focus_draft: String::new(), all_apps: Arc::new(Mutex::new(None)), all_apps_at: sys::ago(Duration::from_secs(3600)), apps_asked: Default::default(), search: String::new(), launcher_sel: 0, show_hidden: false, net, net_tx, bt, bt_tx, joining: None, net_scan_at: sys::ago(Duration::from_secs(60)), tab: Tab::Wallpapers,
               confirm: None, last_change: Instant::now(), screen_w: w as f32 / scale, screen_h: h as f32 / scale, wins: Vec::new(), wins_at: long_ago, guard_at: long_ago,
               active: 0, refitted: HashMap::new(), icons: HashMap::new(), thumbs: HashMap::new() }
     }
@@ -271,7 +271,7 @@ impl Bar {
     fn opened(&mut self, p: Popup) {
         if matches!(p, Popup::Network | Popup::Quick) { let _ = self.net_tx.send(net::NetCmd::Refresh); }
         if p == Popup::Bluetooth { let _ = self.bt_tx.send(bt::BtCmd::CheckAudio); }
-        if p == Popup::Network { self.net_scan_at = Instant::now() - Duration::from_secs(60); }
+        if p == Popup::Network { self.net_scan_at = sys::ago(Duration::from_secs(60)); }
         if p == Popup::Quick { self.quick_view = QuickView::Main; self.quick_note = None; self.sticky = sys::sticky_keys(); }
         if p == Popup::Launcher { self.search.clear(); self.launcher_sel = 0; self.show_hidden = false; self.load_apps(); }
     }
@@ -632,7 +632,7 @@ impl Bar {
         // again (at most once a minute), and use the program's icon meanwhile.
         let loaded = self.all_apps.lock().map(|l| l.is_some()).unwrap_or(false);
         if let (Some(a), true) = (&w.app, loaded) {
-            if self.apps_asked.insert(a.to_ascii_lowercase()) { self.all_apps_at = Instant::now() - Duration::from_secs(3600); self.load_apps(); }
+            if self.apps_asked.insert(a.to_ascii_lowercase()) { self.all_apps_at = sys::ago(Duration::from_secs(3600)); self.load_apps(); }
         }
         if let Some(t) = w.own_exe().and_then(|e| self.icon(ctx, e)) { return Some(t) }
         if let Some(t) = w.app.as_deref().and_then(|a| self.icon(ctx, a)) { return Some(t) }
@@ -1037,7 +1037,7 @@ impl Bar {
         let frac = self.media_seek.unwrap_or(if end > 0.0 { (pos / end).clamp(0.0, 1.0) } else { 0.0 });
         if (resp.drag_stopped() || resp.clicked()) && end > 0.0 {
             if let Some(f) = pointer_frac.or(self.media_seek) {
-                let to = Duration::from_secs_f32(end * f);
+                let to = Duration::try_from_secs_f32(end * f).unwrap_or_default();
                 self.media_now(|m| m.position = to);
                 let _ = self.media_tx.send(media::MediaCmd::Seek(to));
             }
@@ -1048,7 +1048,7 @@ impl Bar {
         ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(track.left() + track.width() * frac, track.bottom())), 2.0, c(t.accent));
         if resp.hovered() || resp.dragged() { ui.painter().circle_filled(pos2(track.left() + track.width() * frac, track.center().y), 6.0, c(t.fg)); }
         ui.horizontal(|ui| {
-            let shown = if end > 0.0 { Duration::from_secs_f32(end * frac) } else { m.position() };
+            let shown = if end > 0.0 { Duration::try_from_secs_f32(end * frac).unwrap_or_default() } else { m.position() };
             ui.label(RichText::new(ronin_core::media::time_label(shown)).color(c(t.muted)).size(11.5));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(RichText::new(if m.end.is_zero() { "live".to_string() } else { ronin_core::media::time_label(m.end) }).color(c(t.muted)).size(11.5));
