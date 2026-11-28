@@ -263,6 +263,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.12.2** | A compact player card: small picture with title, artist and app, a thin progress bar between the times, and buttons that all fit |
 | **0.12.1** | Survives sleep and wake: a watchdog restarts the bar if it ever ends unexpectedly; safe screen size and timing while the PC wakes |
 | **0.12.0** | Media notch: the clock's pill grows into what is playing, with a smooth, in-sync player to play, pause, skip and seek |
 | **0.11.0** | Focus timer: Pomodoro 25 + 5 or 50 + 10 (the break starts by itself), or a timer of any length, which can also count up with no limit |
