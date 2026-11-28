@@ -31,6 +31,9 @@ pub struct Settings {
     pub hide_taskbar: bool,
     /// Slide the bar away when the mouse is not on it (it comes back at the top edge of the screen).
     pub auto_hide: bool,
+    /// Over a maximised window the hidden bar stays hidden; with this on, resting the mouse at the
+    /// screen's edge for half a second brings it back.
+    pub reveal_at_edge: bool,
     /// Which side of the screen the bar is on: "top", "bottom", "left" or "right".
     pub bar_edge: String,
     /// The focus timer's last choice: "pomodoro" or "timer", which Pomodoro round (0 = 25 + 5,
@@ -53,7 +56,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, bar_edge: "top".into(), focus_mode: "pomodoro".into(), focus_preset: 0, timer_minutes: 60, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
+        Settings { theme: "samurai".into(), wallpaper: String::new(), auto_change_minutes: 0, start_with_windows: true, pinned: Vec::new(), hide_taskbar: true, auto_hide: true, reveal_at_edge: false, bar_edge: "top".into(), focus_mode: "pomodoro".into(), focus_preset: 0, timer_minutes: 60, night_light: false, night_strength: crate::night::DEFAULT_STRENGTH, update_popup: true, auto_update: false, hidden_apps: Vec::new(), launch_counts: Vec::new(), original: None }
     }
 }
 
