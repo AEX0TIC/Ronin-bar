@@ -209,7 +209,7 @@ fn run(state: Shared, rx: Receiver<BtCmd>, again: Sender<BtCmd>, wake: eframe::e
     let paired = watch(&state, &wake, &again, true);
     if paired.is_none() { set(&|s| { s.paired = Some(Vec::new()); s.error = Some("Windows did not list your Bluetooth devices.".into()); }); }
     let mut search: Option<(DeviceWatcher, Instant)> = None;
-    let mut audio_at = Instant::now() - Duration::from_secs(60);
+    let mut audio_at = crate::sys::ago(Duration::from_secs(60));
     loop {
         let wait_for = search.as_ref().map(|(_, at)| (*at + SEARCH).saturating_duration_since(Instant::now())).unwrap_or(Duration::from_secs(3600));
         let cmd = match rx.recv_timeout(wait_for.max(Duration::from_millis(50))) {

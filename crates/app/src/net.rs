@@ -342,7 +342,7 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, news: Sender<NetCmd>, 
     let mut before_airplane = (true, false);
     list(&wlan);
     radios_now();
-    let mut last_scan = Instant::now() - Duration::from_secs(60);
+    let mut last_scan = crate::sys::ago(Duration::from_secs(60));
     // Times to read the list again: a scan's results and a new connection arrive a moment later,
     // so the list is read a few times instead of the thread sleeping blind.
     let mut later: Vec<Instant> = Vec::new();

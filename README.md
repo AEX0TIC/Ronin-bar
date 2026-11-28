@@ -224,6 +224,7 @@ Use **Settings → Apps → Ronin Bar → Uninstall**, or ⚙ **→ Uninstall** 
 
 | Problem | Fix |
 |---|---|
+| The bar disappeared after sleep | It comes back by itself within a few seconds (a watchdog restarts it). If it does not, start Ronin Bar from the Start menu |
 | The Windows taskbar is gone after Ronin Bar was ended from Task Manager | Start Ronin Bar again and quit it from ⚙ → *Quit the bar*, or sign out and back in |
 | A window's buttons are under the bar | Maximise the window again; Ronin keeps the top strip free, but a few apps place themselves |
 | Bluetooth headphones won't connect | Make sure they're on and not connected to another device (a phone), then press **connect** again. Still nothing: **forget** them and **pair** them again |
@@ -262,6 +263,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.12.1** | Survives sleep and wake: a watchdog restarts the bar if it ever ends unexpectedly; safe screen size and timing while the PC wakes |
 | **0.12.0** | Media notch: the clock's pill grows into what is playing, with a smooth, in-sync player to play, pause, skip and seek |
 | **0.11.0** | Focus timer: Pomodoro 25 + 5 or 50 + 10 (the break starts by itself), or a timer of any length, which can also count up with no limit |
 | **0.10.0** | Bar on the top, bottom, left or right of the screen; auto-hide gives way only when a window needs the space, so the bar never covers a window unless you call it |
