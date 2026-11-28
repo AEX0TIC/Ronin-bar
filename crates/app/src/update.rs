@@ -71,29 +71,58 @@ pub fn fetch(s: Shared, wake: eframe::egui::Context) {
 }
 
 fn fetch_now(rel: &Release, s: &Shared, wake: &eframe::egui::Context) -> Result<PathBuf, String> {
-    let agent = download::agent();
-    let sha_text = agent.get(&rel.sha_url).call().map_err(|e| format!("Download failed: {e}"))?
-        .body_mut().with_config().limit(4096).read_to_string().map_err(|e| e.to_string())?;
-    let want = update::parse_sha256(&sha_text, &rel.exe_name).ok_or("The release's SHA-256 file is not valid")?;
-    let mut resp = agent.get(&rel.exe_url).call().map_err(|e| format!("Download failed: {e}"))?;
+    // A dropped Wi-Fi or a slow GitHub server often works on the next try.
+    let mut last = String::new();
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            set(s, wake, |st| st.downloading = Some((0, 0)));
+            std::thread::sleep(std::time::Duration::from_secs(2 * attempt));
+        }
+        match try_fetch(rel, s, wake) {
+            Ok(p) => return Ok(p),
+            // A wrong checksum will not get better by asking again.
+            Err((e, false)) => return Err(e),
+            Err((e, true)) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// One download; the error says whether trying again could help.
+fn try_fetch(rel: &Release, s: &Shared, wake: &eframe::egui::Context) -> Result<PathBuf, (String, bool)> {
+    let retry = |e: String| (e, true);
+    let agent = download::update_agent();
+    let sha_text = agent.get(&rel.sha_url).call().map_err(|e| retry(format!("Could not reach GitHub: {e}")))?
+        .body_mut().with_config().limit(4096).read_to_string().map_err(|e| retry(format!("Download failed: {e}")))?;
+    let want = update::parse_sha256(&sha_text, &rel.exe_name).ok_or(("The release's SHA-256 file is not valid".to_string(), false))?;
+    let mut resp = agent.get(&rel.exe_url).call().map_err(|e| retry(format!("Could not reach GitHub: {e}")))?;
     let total = resp.body().content_length().unwrap_or(0);
+    if total > update::MAX_EXE_BYTES { return Err(("The download is far too big to be Ronin Bar.".into(), false)) }
+    // The size is known now: the bar can show it before the first bytes come in.
+    set(s, wake, |st| st.downloading = Some((0, total)));
     let mut reader = resp.body_mut().with_config().limit(update::MAX_EXE_BYTES).reader();
-    let (mut data, mut buf) = (Vec::with_capacity(total.min(update::MAX_EXE_BYTES) as usize), vec![0u8; 64 * 1024]);
-    let mut shown = 0u64;
+    let (mut data, mut buf) = (Vec::with_capacity(total as usize), vec![0u8; 64 * 1024]);
+    let mut shown = std::time::Instant::now();
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("Download failed: {e}"))?;
+        let n = reader.read(&mut buf).map_err(|e| retry(format!("Download failed: {e}")))?;
         if n == 0 { break }
         data.extend_from_slice(&buf[..n]);
-        let got = data.len() as u64;
-        // Progress about every quarter megabyte.
-        if got - shown >= 256 * 1024 { shown = got; set(s, wake, |st| st.downloading = Some((got, total))); }
+        // Smooth progress without waking the bar for every packet.
+        if shown.elapsed() >= std::time::Duration::from_millis(50) {
+            shown = std::time::Instant::now();
+            let got = data.len() as u64;
+            set(s, wake, |st| st.downloading = Some((got, total)));
+        }
     }
+    if total > 0 && (data.len() as u64) < total { return Err(retry("The download stopped before the end.".into())) }
+    let got = data.len() as u64;
+    set(s, wake, |st| st.downloading = Some((got, total.max(got))));
     let have: String = Sha256::digest(&data).iter().map(|b| format!("{b:02x}")).collect();
-    if have != want { return Err("The download does not match the release's SHA-256, so it was not installed.".into()) }
+    if have != want { return Err(("The download does not match the release's SHA-256, so it was not installed.".into(), false)) }
     let dir = update_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| (e.to_string(), false))?;
     let path = dir.join(&rel.exe_name);
-    crate::store::write_atomic(&path, &data).map_err(|e| format!("Could not save the update: {e}"))?;
+    crate::store::write_atomic(&path, &data).map_err(|e| (format!("Could not save the update: {e}"), false))?;
     Ok(path)
 }
 

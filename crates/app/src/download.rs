@@ -14,16 +14,28 @@ pub struct Progress {
 }
 
 pub fn agent() -> ureq::Agent {
+    base().timeout_global(Some(Duration::from_secs(60))).build().into()
+}
+
+/// For the update download: quick to notice a dead connection, but never cuts off a slow one
+/// that is still bringing data.
+pub fn update_agent() -> ureq::Agent {
+    base()
+        .timeout_connect(Some(Duration::from_secs(15)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(15 * 60)))
+        .build()
+        .into()
+}
+
+fn base() -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
     // Windows' own certificate store (the default, a bundled list, does not work with native-tls on Windows).
     let tls = ureq::tls::TlsConfig::builder().provider(ureq::tls::TlsProvider::NativeTls)
         .root_certs(ureq::tls::RootCerts::PlatformVerifier).build();
     ureq::Agent::config_builder()
         .tls_config(tls)
         .https_only(true)
-        .timeout_global(Some(Duration::from_secs(60)))
         .user_agent(concat!("RoninBar/", env!("CARGO_PKG_VERSION"), " (+https://github.com/AEX0TIC/Ronin-bar)"))
-        .build()
-        .into()
 }
 
 /// wallhaven.cc's search allows 45 requests a minute; one every 1.5 s stays well under that.
