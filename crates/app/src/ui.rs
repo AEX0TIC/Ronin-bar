@@ -2183,18 +2183,28 @@ impl Bar {
         let t = self.theme();
         let u = self.upd.lock().map(|u| u.clone()).unwrap_or_default();
         if let Some((got, total)) = u.downloading {
-            let frac = if total > 0 { got as f32 / total as f32 } else { 0.0 };
-            ui.add(egui::ProgressBar::new(frac).desired_width(ui.available_width()).text(format!("Downloading… {:.1} MB", got as f32 / 1_048_576.0)));
+            let mb = |b: u64| b as f32 / 1_048_576.0;
+            let bar = egui::ProgressBar::new(if total > 0 { got as f32 / total as f32 } else { 0.0 }).desired_width(ui.available_width());
+            let bar = match (got, total) {
+                (0, 0) => bar.animate(true).text("Connecting to GitHub…"),
+                (_, 0) => bar.animate(true).text(format!("Downloading… {:.1} MB", mb(got))),
+                _ => bar.text(format!("Downloading {:.1} of {:.1} MB ({}%)", mb(got), mb(total), got * 100 / total)),
+            };
+            ui.add(bar);
         } else if u.ready.is_some() {
             ui.label(RichText::new("Installing…").color(c(t.accent)));
         } else if let Some(r) = &u.latest {
-            if ui.button(RichText::new(format!("Install Ronin Bar {}", r.version)).strong()).clicked() { self.install_update(); }
+            let label = if u.error.is_some() { "Try again".to_string() } else { format!("Install Ronin Bar {}", r.version) };
+            if ui.button(RichText::new(label).strong()).clicked() { self.install_update(); }
         } else if u.checking {
             ui.label(RichText::new("Looking for a new version…").color(c(t.muted)));
         } else if u.up_to_date {
             ui.label(RichText::new("You have the newest version.").color(c(t.muted)));
         }
-        if let Some(e) = &u.error { ui.label(RichText::new(e).color(c(t.accent)).size(12.0)); }
+        if let Some(e) = &u.error {
+            ui.label(RichText::new(e).color(c(t.accent)).size(12.0));
+            if u.downloading.is_none() && u.ready.is_none() && ui.button("Download from GitHub").clicked() { sys::open_releases_page(); }
+        }
     }
 
     /// The focus timer's popup: the time left, and Start / Pause / Reset.
