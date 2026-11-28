@@ -180,6 +180,32 @@ impl Wlan {
         out
     }
 
+    /// The Wi-Fi adapter's own on / off (None when it cannot say).
+    fn radio_on(&self) -> Option<bool> {
+        let g = self.iface.as_ref()?;
+        unsafe {
+            let (mut size, mut data) = (0u32, std::ptr::null_mut::<std::ffi::c_void>());
+            if WlanQueryInterface(self.h, g, wlan_intf_opcode_radio_state, None, &mut size, &mut data, None) != 0 || data.is_null() { return None }
+            let st = &*(data as *const WLAN_RADIO_STATE);
+            let n = (st.dwNumberOfPhys as usize).min(64);
+            let on = (0..n).any(|i| st.PhyRadioState[i].dot11SoftwareRadioState == dot11_radio_state_on && st.PhyRadioState[i].dot11HardwareRadioState == dot11_radio_state_on);
+            WlanFreeMemory(data as *const _);
+            (n > 0).then_some(on)
+        }
+    }
+
+    /// How many radios ("phys") the adapter has.
+    fn radio_phys(&self) -> u32 {
+        let Some(g) = self.iface.as_ref() else { return 0 };
+        unsafe {
+            let (mut size, mut data) = (0u32, std::ptr::null_mut::<std::ffi::c_void>());
+            if WlanQueryInterface(self.h, g, wlan_intf_opcode_radio_state, None, &mut size, &mut data, None) != 0 || data.is_null() { return 0 }
+            let n = (*(data as *const WLAN_RADIO_STATE)).dwNumberOfPhys.min(64);
+            WlanFreeMemory(data as *const _);
+            n
+        }
+    }
+
     fn connect_profile(&self, profile: &str) -> Result<(), String> {
         let g = self.iface.as_ref().ok_or("No Wi-Fi adapter")?;
         let name = HSTRING::from(profile);
@@ -210,6 +236,12 @@ impl Wlan {
 /// The PC's radios, found once and then kept: reading or switching them is then immediate.
 static RADIOS: std::sync::OnceLock<Mutex<Vec<Radio>>> = std::sync::OnceLock::new();
 
+/// Forgets the kept radios. Some Wi-Fi drivers replace their radio when Wi-Fi is turned off or on,
+/// and the old one then refuses everything ("not in the correct state").
+fn forget_radios() {
+    if let Some(m) = RADIOS.get() { if let Ok(mut l) = m.lock() { l.clear(); } }
+}
+
 fn radio_list() -> Vec<Radio> {
     let cached = RADIOS.get().and_then(|m| m.lock().ok().map(|l| l.clone())).unwrap_or_default();
     if !cached.is_empty() { return cached }
@@ -220,6 +252,8 @@ fn radio_list() -> Vec<Radio> {
 
 /// Wi-Fi and Bluetooth radios: on, off, or None when there is none (or access was refused).
 fn radios() -> (Option<bool>, Option<bool>) {
+    // A kept radio that no longer answers was replaced by its driver: find the radios again.
+    if radio_list().iter().any(|r| r.State().is_err()) { forget_radios(); }
     let list = radio_list();
     if list.is_empty() { return (None, None) }
     let (mut wifi, mut bt) = (None, None);
@@ -237,14 +271,39 @@ fn radios() -> (Option<bool>, Option<bool>) {
 fn set_radio(bluetooth: bool, on: bool) -> Result<(), String> {
     static ACCESS: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     ACCESS.get_or_init(|| { let _ = wait(Radio::RequestAccessAsync(), Duration::from_secs(4)); });
+    // The kept radios first; if that fails, the radios found again (the driver may have replaced
+    // them); and for Wi-Fi, finally the Wi-Fi adapter's own switch.
+    let first = switch_radios(bluetooth, on);
+    if first.is_ok() { return first }
+    forget_radios();
+    let again = switch_radios(bluetooth, on);
+    if again.is_ok() || bluetooth { return again }
+    wlan_radio(on).or(again)
+}
+
+fn switch_radios(bluetooth: bool, on: bool) -> Result<(), String> {
     let list = radio_list();
-    if list.is_empty() { return Err("Windows did not find the radio".into()) }
     let kind = if bluetooth { RadioKind::Bluetooth } else { RadioKind::WiFi };
-    for r in list {
-        if r.Kind().ok() == Some(kind) {
-            let state = if on { RadioState::On } else { RadioState::Off };
-            wait(r.SetStateAsync(state), Duration::from_secs(8))?;
-        }
+    let mine: Vec<Radio> = list.into_iter().filter(|r| r.Kind().ok() == Some(kind)).collect();
+    if mine.is_empty() { return Err("Windows did not find the radio".into()) }
+    let want = if on { RadioState::On } else { RadioState::Off };
+    for r in mine {
+        if r.State().ok() == Some(want) { continue }   // already there: nothing to ask
+        wait(r.SetStateAsync(want), Duration::from_secs(8))?;
+    }
+    Ok(())
+}
+
+/// Turns Wi-Fi on or off with the Wi-Fi adapter's own switch (what Windows' Wi-Fi button does).
+fn wlan_radio(on: bool) -> Result<(), String> {
+    let w = Wlan::open().ok_or("Wi-Fi is not available")?;
+    let g = w.iface.ok_or("No Wi-Fi adapter")?;
+    let phys = w.radio_phys().max(1);
+    let state = if on { dot11_radio_state_on } else { dot11_radio_state_off };
+    for i in 0..phys {
+        let st = WLAN_PHY_RADIO_STATE { dwPhyIndex: i, dot11SoftwareRadioState: state, dot11HardwareRadioState: state };
+        let r = unsafe { WlanSetInterface(w.h, &g, wlan_intf_opcode_radio_state, std::mem::size_of::<WLAN_PHY_RADIO_STATE>() as u32, &st as *const _ as *const std::ffi::c_void, None) };
+        if r != 0 { return Err(format!("the Wi-Fi adapter refused (error {r})")) }
     }
     Ok(())
 }
@@ -297,9 +356,19 @@ fn run(state: Arc<Mutex<NetState>>, rx: Receiver<NetCmd>, news: Sender<NetCmd>, 
     let set = |f: &dyn Fn(&mut NetState)| { if let Ok(mut s) = state.lock() { f(&mut s); } wake.request_repaint(); };
     set(&|s| s.no_wifi = wlan.as_ref().and_then(|w| w.iface).is_none());
     let list = |wlan: &Option<Wlan>| {
-        let nets = wlan.as_ref().map(|w| w.networks()).unwrap_or_default();
+        // Whether Wi-Fi is on comes from the adapter itself (always right, even when Windows'
+        // radio list is out of date); while it is off there is nothing to list or search for.
+        let radio = wlan.as_ref().and_then(|w| w.radio_on());
+        let nets = if radio == Some(false) { Vec::new() } else { wlan.as_ref().map(|w| w.networks()).unwrap_or_default() };
         let now = nets.iter().find(|n| n.connected).map(|n| (n.ssid.clone(), n.quality));
-        set(&|s| { s.networks = nets.clone(); s.connected = now.clone(); });
+        set(&|s| {
+            s.networks = nets.clone();
+            s.connected = now.clone();
+            if let Some(on) = radio {
+                if s.hold.map(|t| t.elapsed() > Duration::from_secs(6)).unwrap_or(true) { s.wifi_on = Some(on); }
+                if !on { s.scanning = false; }
+            }
+        });
     };
     // Radio and hotspot state are read on a thread of their own (one at a time): those Windows
     // calls can be slow, and the Wi-Fi list must never wait for them.
