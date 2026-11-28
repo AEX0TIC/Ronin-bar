@@ -1661,7 +1661,8 @@ impl Bar {
 
     fn pop_network(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
-        if self.net_scan_at.elapsed() > Duration::from_secs(10) {
+        let wifi_off = self.net.lock().map(|s| s.wifi_on == Some(false)).unwrap_or(false);
+        if self.net_scan_at.elapsed() > Duration::from_secs(10) && !wifi_off {
             let _ = self.net_tx.send(net::NetCmd::Scan);
             self.net_scan_at = Instant::now();
         }
@@ -1671,7 +1672,7 @@ impl Bar {
         ui.horizontal(|ui| {
             if self.from_quick { back = self.back_button(ui); }
             ui.label(RichText::new("Wi-Fi").strong().size(15.0));
-            if st.scanning && st.networks.len() < 2 { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
+            if st.scanning && st.networks.len() < 2 && st.wifi_on != Some(false) { ui.label(RichText::new("searching…").color(c(t.muted)).size(12.0)); }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if let Some(on) = st.wifi_on {
                     if self.switch(ui, on).clicked() { self.radio(false, !on); }
