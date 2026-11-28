@@ -164,7 +164,7 @@ pub struct Bar {
 }
 
 fn popup_size(p: Popup) -> (f32, f32) {
-    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (340.0, 400.0), Popup::Media => (400.0, 236.0) }
+    match p { Popup::Launcher => (440.0, 600.0), Popup::Calendar => (330.0, 392.0), Popup::Sound => (330.0, 178.0), Popup::Power => (300.0, 330.0), Popup::Battery => (330.0, 280.0), Popup::Network => (360.0, 470.0), Popup::Bluetooth => (360.0, 470.0), Popup::Quick => (3.0 * TILE_W + 2.0 * TILE_GAP + 32.0, 520.0), Popup::Update => (400.0, 430.0), Popup::Focus => (340.0, 400.0), Popup::Media => (360.0, 196.0) }
 }
 
 /// The focus timer as the settings describe it: a Pomodoro round, or a timer of the saved length.
@@ -1002,8 +1002,9 @@ impl Bar {
         if m.playing && self.bar_hide == 0 { ctx.request_repaint_after(Duration::from_millis(33)); }
     }
 
-    /// The player popup: big picture, title, artist, app, a progress bar that glides with the
-    /// music (click or drag to jump), and previous / play-pause / next.
+    /// The player popup, a compact card: the picture and the title, artist and app beside it
+    /// (with bars that move while it plays), a thin progress bar between the two times (click or
+    /// drag to jump), and previous / play-pause / next underneath.
     fn pop_media(&mut self, ui: &mut egui::Ui) {
         let t = self.theme();
         let ctx = ui.ctx().clone();
@@ -1011,67 +1012,87 @@ impl Bar {
             ui.label(RichText::new("Nothing is playing.").color(c(t.muted)));
             return
         };
+        let time = ctx.input(|i| i.time) as f32;
+        // Picture and words.
         ui.horizontal(|ui| {
-            let (art_r, _) = ui.allocate_exact_size(Vec2::splat(112.0), Sense::hover());
+            let (art_r, _) = ui.allocate_exact_size(Vec2::splat(64.0), Sense::hover());
             match self.art_tex(&ctx, &m) {
-                Some(tex) => { ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::filled(art_r, 12.0, Color32::WHITE).with_texture(tex.id(), cover_uv(tex.size())))); }
-                None => { ui.painter().rect_filled(art_r, 12.0, c(t.surface)); glyph::play(ui.painter(), art_r.shrink(34.0), glyph::Play::Note, c(t.accent)); }
+                Some(tex) => { ui.painter().add(egui::Shape::Rect(egui::epaint::RectShape::filled(art_r, 10.0, Color32::WHITE).with_texture(tex.id(), cover_uv(tex.size())))); }
+                None => { ui.painter().rect_filled(art_r, 10.0, c(t.surface)); glyph::play(ui.painter(), art_r.shrink(20.0), glyph::Play::Note, c(t.accent)); }
             }
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
-                ui.add(egui::Label::new(RichText::new(&m.title).strong().size(16.0)).wrap());
-                if !m.artist.is_empty() { ui.label(RichText::new(&m.artist).color(c(t.muted)).size(13.0)); }
+                ui.spacing_mut().item_spacing.y = 2.0;
                 ui.add_space(4.0);
-                ui.label(RichText::new(&m.app).color(c(t.accent)).size(11.5));
+                ui.add(egui::Label::new(RichText::new(&m.title).strong().size(14.5)).truncate()).on_hover_text(&m.title);
+                if !m.artist.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(&m.artist).color(c(t.muted)).size(12.5)).truncate());
+                }
+                ui.add_space(2.0);
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&m.app).color(c(t.accent)).size(11.5));
+                    // Little bars that move while it plays.
+                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 12.0), Sense::hover());
+                    for k in 0..3 {
+                        let kf = k as f32;
+                        let h = if m.playing { 3.0 + 8.0 * (0.5 + 0.5 * (time * (5.3 + kf * 1.9) + kf * 1.7).sin()) } else { 3.0 };
+                        ui.painter().rect_filled(Rect::from_center_size(pos2(r.left() + 3.0 + kf * 5.0, r.center().y), vec2(3.0, h)), 1.5, c(t.accent));
+                    }
+                });
             });
         });
-        ui.add_space(10.0);
-        // The progress bar.
-        let w = ui.available_width();
-        let (bar, resp) = ui.allocate_exact_size(vec2(w, 16.0), if m.can_seek && !m.end.is_zero() { Sense::click_and_drag() } else { Sense::hover() });
+        ui.add_space(8.0);
+        // Times either side of a thin progress bar.
         let end = m.end.as_secs_f32();
         let pos = m.position().as_secs_f32();
-        let pointer_frac = resp.interact_pointer_pos().map(|p| ((p.x - bar.left()) / bar.width()).clamp(0.0, 1.0));
-        if resp.dragged() { self.media_seek = pointer_frac; }
-        let frac = self.media_seek.unwrap_or(if end > 0.0 { (pos / end).clamp(0.0, 1.0) } else { 0.0 });
-        if (resp.drag_stopped() || resp.clicked()) && end > 0.0 {
-            if let Some(f) = pointer_frac.or(self.media_seek) {
-                let to = Duration::try_from_secs_f32(end * f).unwrap_or_default();
-                self.media_now(|m| m.position = to);
-                let _ = self.media_tx.send(media::MediaCmd::Seek(to));
-            }
-            self.media_seek = None;
-        }
-        let track = Rect::from_center_size(bar.center(), vec2(bar.width(), 4.0));
-        ui.painter().rect_filled(track, 2.0, c(t.surface));
-        ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(track.left() + track.width() * frac, track.bottom())), 2.0, c(t.accent));
-        if resp.hovered() || resp.dragged() { ui.painter().circle_filled(pos2(track.left() + track.width() * frac, track.center().y), 6.0, c(t.fg)); }
+        let seekable = m.can_seek && end > 0.0;
+        let small = |d: Duration| RichText::new(ronin_core::media::time_label(d)).color(c(t.muted)).size(11.0).monospace();
+        let mut frac = self.media_seek.unwrap_or(if end > 0.0 { (pos / end).clamp(0.0, 1.0) } else { 0.0 });
         ui.horizontal(|ui| {
             let shown = if end > 0.0 { Duration::try_from_secs_f32(end * frac).unwrap_or_default() } else { m.position() };
-            ui.label(RichText::new(ronin_core::media::time_label(shown)).color(c(t.muted)).size(11.5));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(if m.end.is_zero() { "live".to_string() } else { ronin_core::media::time_label(m.end) }).color(c(t.muted)).size(11.5));
-            });
+            ui.label(small(shown));
+            let right_w = 44.0;
+            let (bar, resp) = ui.allocate_exact_size(vec2((ui.available_width() - right_w).max(40.0), 14.0), if seekable { Sense::click_and_drag() } else { Sense::hover() });
+            let pointer = resp.interact_pointer_pos().map(|p| ((p.x - bar.left()) / bar.width().max(1.0)).clamp(0.0, 1.0));
+            if resp.dragged() { self.media_seek = pointer; frac = pointer.unwrap_or(frac); }
+            if (resp.drag_stopped() || resp.clicked()) && seekable {
+                if let Some(f) = pointer.or(self.media_seek) {
+                    let to = Duration::try_from_secs_f32(end * f).unwrap_or_default();
+                    self.media_now(|m| m.position = to);
+                    let _ = self.media_tx.send(media::MediaCmd::Seek(to));
+                }
+                self.media_seek = None;
+            }
+            let active = resp.hovered() || resp.dragged();
+            let track = Rect::from_center_size(bar.center(), vec2(bar.width(), if active { 5.0 } else { 3.0 }));
+            ui.painter().rect_filled(track, 3.0, c(t.surface));
+            ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(track.left() + track.width() * frac, track.bottom())), 3.0, c(t.accent));
+            if active && seekable { ui.painter().circle_filled(pos2(track.left() + track.width() * frac, track.center().y), 5.5, c(t.fg)); }
+            if m.end.is_zero() { ui.label(RichText::new("live").color(c(t.accent)).size(11.0)); } else { ui.label(small(m.end)); }
         });
-        // Previous · play / pause · next.
-        ui.add_space(2.0);
-        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+        ui.add_space(4.0);
+        // Previous · play / pause · next, centred.
+        let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
         let cx = row.center().x;
         let button = |ui: &mut egui::Ui, center: egui::Pos2, size: f32, k: glyph::Play, main: bool, on: bool, key: &str| -> bool {
             let r = Rect::from_center_size(center, Vec2::splat(size));
             let resp = ui.interact(r, ui.scope_id().with(key), if on { Sense::click() } else { Sense::hover() });
-            if main { ui.painter().circle_filled(r.center(), size / 2.0, c(t.accent)); }
-            else if resp.hovered() && on { ui.painter().circle_filled(r.center(), size / 2.0, c(t.surface)); }
+            if main {
+                let grow = if resp.hovered() { 1.5 } else { 0.0 };
+                ui.painter().circle_filled(r.center(), size / 2.0 + grow, c(t.accent));
+            } else if resp.hovered() && on {
+                ui.painter().circle_filled(r.center(), size / 2.0, c(t.surface));
+            }
             let ink = if main { c(t.bg) } else if on { c(t.fg) } else { c(t.muted).gamma_multiply(0.5) };
-            glyph::play(ui.painter(), r.shrink(size * 0.26), k, ink);
+            glyph::play(ui.painter(), r.shrink(size * 0.27), k, ink);
             resp.clicked()
         };
-        if button(ui, pos2(cx - 58.0, row.center().y), 36.0, glyph::Play::Prev, false, m.can_prev, "prev") {
+        if button(ui, pos2(cx - 50.0, row.center().y), 30.0, glyph::Play::Prev, false, m.can_prev, "prev") {
             let _ = self.media_tx.send(media::MediaCmd::Prev);
         }
-        if button(ui, row.center(), 46.0, if m.playing { glyph::Play::Pause } else { glyph::Play::Start }, true, true, "toggle") { self.media_toggle(); }
-        if button(ui, pos2(cx + 58.0, row.center().y), 36.0, glyph::Play::Next, false, m.can_next, "next") {
+        if button(ui, row.center(), 38.0, if m.playing { glyph::Play::Pause } else { glyph::Play::Start }, true, true, "toggle") { self.media_toggle(); }
+        if button(ui, pos2(cx + 50.0, row.center().y), 30.0, glyph::Play::Next, false, m.can_next, "next") {
             let _ = self.media_tx.send(media::MediaCmd::Next);
         }
         // Silky while open and playing: every frame.
