@@ -263,6 +263,7 @@ cargo build --release -p ronin-bar   # target\release\ronin-bar.exe
 
 | Version | What changed |
 |---|---|
+| **0.12.4** | Wi-Fi switching fixed after Wi-Fi was turned off; the switch always shows the adapter's real state |
 | **0.12.3** | The bar never comes down over a maximised window; resting at the edge to bring it back is now an option in Settings |
 | **0.12.2** | A compact player card: small picture with title, artist and app, a thin progress bar between the times, and buttons that all fit |
 | **0.12.1** | Survives sleep and wake: a watchdog restarts the bar if it ever ends unexpectedly; safe screen size and timing while the PC wakes |
